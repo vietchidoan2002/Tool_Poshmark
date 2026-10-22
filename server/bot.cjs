@@ -7,18 +7,22 @@ const readline = require('readline');
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const question = (query) => new Promise((resolve) => rl.question(query, resolve));
 
-const CONFIG_PATH = path.join(process.cwd(), 'config.json');
-const CREDENTIALS_PATH = path.join(process.cwd(), 'credentials.json');
-
-// ID Sheet của bạn
-const APP_CONFIG_PATH = path.join(process.cwd(), 'config.json');
-const APP_CONFIG = fs.existsSync(APP_CONFIG_PATH) ? JSON.parse(fs.readFileSync(APP_CONFIG_PATH, 'utf8')) : {};
+const ROOT = path.resolve(__dirname, '..');
+const CONFIG_PATH = path.join(ROOT, 'config.json');
+const CREDENTIALS_PATH = path.join(ROOT, 'credentials.json');
+const APP_CONFIG = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
 const SPREADSHEET_ID = String(APP_CONFIG.sheetId || '').trim();
+
+function logLine(level, message) {
+    const time = new Date().toLocaleTimeString('vi-VN', { hour12: false });
+    const labels = { INFO: 'INFO', SCAN: 'SCAN', ORDER: 'ORDER', OK: 'DONE', SKIP: 'SKIP', WARN: 'WARN', ERROR: 'ERROR' };
+    console.log(`[${time}] ${labels[level] || level}  ${message}`);
+}
 
 async function authorize(tokenPath) {
     const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf-8'));
     const key = credentials.installed || credentials.web;
-    const oAuth2Client = new google.auth.OAuth2(key.client_id, key.client_secret, 'http://localhost');
+    const oAuth2Client = new google.auth.OAuth2(key.client_id, key.client_secret, 'http://localhost:3210/oauth2callback');
     const token = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
     oAuth2Client.setCredentials(token);
     return oAuth2Client;
@@ -33,12 +37,14 @@ function formatMockupUrl(url) {
     } catch (e) { return url; }
 }
 
-async function processOrders(auth, manualAccountName) {
+async function processOrders(auth, manualAccountName, sheetName) {
+    let writtenCount = 0;
+    let skippedCount = 0;
     const gmail = google.gmail({ version: 'v1', auth });
     const sheets = google.sheets({ version: 'v4', auth });
 
     try {
-        console.log(`\n[Tài khoản đang quét] Đang kiểm tra mail...`);
+        logLine("SCAN", `Account: ${manualAccountName} | Đang quét email...`);
 
         // ==========================================
         // TÍNH NĂNG MỚI: QUÉT SHEET TÌM DÒNG TRỐNG & LƯU LẠI CÁC ID ĐÃ CÓ
@@ -49,7 +55,7 @@ async function processOrders(auth, manualAccountName) {
         try {
             const response = await sheets.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
-                range: "'Đơn poshmark'!H:H",
+                range: `'${sheetName.replace(/'/g, "''")}'!H:H`,
             });
             const rows = response.data.values;
             let lastDataRow = 1;
@@ -69,19 +75,22 @@ async function processOrders(auth, manualAccountName) {
             }
             targetRow = Math.max(lastDataRow + 1, 2);
         } catch (sheetErr) {
-            console.error(`❌ Lỗi API Google Sheet. Vui lòng kiểm tra lại quyền!`);
-            return;
+            logLine("ERROR", `Không thể đọc Google Sheets: ${sheetErr.message}`);
+            if (sheetErr.response?.data) {
+                console.error(JSON.stringify(sheetErr.response.data, null, 2));
+            }
+            throw sheetErr;
         }
 
         const res = await gmail.users.messages.list({ userId: 'me', q: 'is:unread' });
         const messages = res.data.messages;
         
         if (!messages || messages.length === 0) {
-            console.log(`[Tài khoản này] Không có thư nào mới.`);
-            return;
+            logLine("INFO", "Không có email mới cần xử lý.");
+            return { writtenCount, skippedCount };
         }
 
-        console.log(`[Tài khoản này] Có ${messages.length} thư chưa đọc. Đang phân tích...`);
+        logLine("INFO", `Tìm thấy ${messages.length} email chưa đọc.`);
 
         for (const msg of messages) {
             const msgId = msg.id;
@@ -90,22 +99,28 @@ async function processOrders(auth, manualAccountName) {
 
             const subjectHeader = payload.headers.find(h => h.name.toLowerCase() === 'subject');
             const subjectTitle = subjectHeader ? subjectHeader.value : "Không rõ tiêu đề";
-            console.log(`\n📧 Đang xử lý thư: "${subjectTitle}"`);
 
-            let emailBodyRaw = '';
-            
+
+            // Gmail thường chứa cả bản text/plain và text/html của cùng một email.
+            // Không ghép cả hai bản vì sẽ khiến một Order ID bị đọc hai lần trong cùng email.
+            const htmlBodies = [];
+            const plainBodies = [];
+
             function extractParts(part) {
                 if (part.body && part.body.data) {
-                    let decoded = Buffer.from(part.body.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8');
-                    if (part.mimeType === 'text/html') {
-                        emailBodyRaw += decoded + ' ';
-                    } else if (part.mimeType === 'text/plain' && !emailBodyRaw.includes('<html')) {
-                        emailBodyRaw += decoded + ' ';
-                    }
+                    const decoded = Buffer.from(
+                        part.body.data.replace(/-/g, '+').replace(/_/g, '/'),
+                        'base64'
+                    ).toString('utf-8');
+                    if (part.mimeType === 'text/html') htmlBodies.push(decoded);
+                    else if (part.mimeType === 'text/plain') plainBodies.push(decoded);
                 }
                 if (part.parts) part.parts.forEach(extractParts);
             }
             extractParts(payload);
+            let emailBodyRaw = htmlBodies.length
+                ? htmlBodies.join(' ')
+                : plainBodies.join(' ');
 
             emailBodyRaw = emailBodyRaw.replace(/<br[^>]*>/gi, ' \n ')
                                        .replace(/<\/div>/gi, ' \n ')
@@ -168,14 +183,13 @@ async function processOrders(auth, manualAccountName) {
                     // KHIÊN CHỐNG TRÙNG LẶP ĐƠN HÀNG
                     // ==========================================
                     if (existingOrderIds.has(orderId)) {
-                        console.log(`  -> ⏭️ BỎ QUA: Đơn ID [${orderId}] đã có trong Sheet rồi (Poshmark gửi nhiều mail trùng).`);
+                        skippedCount++;
+                        logLine("SKIP", `Đơn ID ${orderId} đã có trong Sheet.`);
                         // Vẫn tăng biến đếm ảnh để các đơn chưa có bên dưới không bị lấy nhầm ảnh của đơn đã bỏ qua
                         const skippedItemsCount = Math.max(block.split(/Size:/i).length - 1, 1);
                         currentImgIndex += skippedItemsCount;
                         continue;
                     }
-                    existingOrderIds.add(orderId); // Lưu ngay vào bộ nhớ để các thư quét sau không bị trùng
-
                     let orderMonth = '', orderDateFmt = '';
                     const dateMatch = block.match(/([A-Za-z]+\s+\d{1,2},\s+\d{4})/i);
                     if (dateMatch) {
@@ -234,19 +248,19 @@ async function processOrders(auth, manualAccountName) {
                         const currentMockup = formatMockupUrl(allImages[currentImgIndex] || ""); 
                         currentImgIndex++;
 
-                        dataToWrite.push({ range: `'Đơn poshmark'!B${targetRow}`, values: [[orderMonth]] });
-                        dataToWrite.push({ range: `'Đơn poshmark'!C${targetRow}`, values: [[orderDateFmt]] });
-                        dataToWrite.push({ range: `'Đơn poshmark'!F${targetRow}`, values: [[manualAccountName]] });
-                        dataToWrite.push({ range: `'Đơn poshmark'!G${targetRow}`, values: [[item.buyer]] });
-                        dataToWrite.push({ range: `'Đơn poshmark'!H${targetRow}`, values: [[orderId]] });
-                        dataToWrite.push({ range: `'Đơn poshmark'!J${targetRow}`, values: [["1"]] });
-                        dataToWrite.push({ range: `'Đơn poshmark'!K${targetRow}`, values: [["T-shirt"]] });
-                        dataToWrite.push({ range: `'Đơn poshmark'!L${targetRow}`, values: [[item.size]] });
-                        dataToWrite.push({ range: `'Đơn poshmark'!O${targetRow}`, values: [[earnings]] });
-                        dataToWrite.push({ range: `'Đơn poshmark'!R${targetRow}`, values: [[orderId]] });
-                        dataToWrite.push({ range: `'Đơn poshmark'!W${targetRow}`, values: [[currentMockup]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!B${targetRow}`, values: [[orderMonth]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!C${targetRow}`, values: [[orderDateFmt]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!F${targetRow}`, values: [[manualAccountName]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!G${targetRow}`, values: [[item.buyer]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!H${targetRow}`, values: [[orderId]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!J${targetRow}`, values: [["1"]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!K${targetRow}`, values: [["T-shirt"]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!L${targetRow}`, values: [[item.size]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!O${targetRow}`, values: [[earnings]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!R${targetRow}`, values: [[orderId]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!W${targetRow}`, values: [[currentMockup]] });
 
-                        console.log(`  -> SẴN SÀNG GHI (Áo ${k+1}/${items.length}): ID ${orderId} | Buyer: ${item.buyer} | Size: ${item.size} | Earn: ${earnings}`);
+                        logLine("ORDER", `Đang ghi đơn ${orderId} | Buyer: ${item.buyer || "N/A"} | Size: ${item.size || "N/A"}`);
                         targetRow++;
                     }
 
@@ -255,7 +269,9 @@ async function processOrders(auth, manualAccountName) {
                             spreadsheetId: SPREADSHEET_ID,
                             resource: { valueInputOption: 'USER_ENTERED', data: dataToWrite }
                         });
-                        console.log(`  => ✅ ĐÃ GHI THÀNH CÔNG VÀO SHEET!`);
+                        writtenCount += dataToWrite.length / 11;
+                        existingOrderIds.add(orderId);
+                        logLine("OK", `Đã ghi đơn ${orderId} vào Sheet.`);
                     }
                 }
             }
@@ -265,68 +281,49 @@ async function processOrders(auth, manualAccountName) {
                 resource: { removeLabelIds: ['UNREAD'] }
             });
         }
-        console.log(`\n[Xong] Xử lý hoàn tất tài khoản!\n`);
+        logLine("OK", `Hoàn tất account ${manualAccountName} | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount}`);
+        return { writtenCount, skippedCount };
 
     } catch (error) {
-        console.error(`[Lỗi xử lý]:`, error.message);
+        logLine("ERROR", `Lỗi trong quá trình xử lý: ${error.message}`);
     }
 }
 
 async function main() {
-    console.log("KHỞI ĐỘNG TOOL");
+    logLine("INFO", "Khởi động Get Label.");
 
-    const labelsDir = path.join(process.cwd(), 'labels');
-    if (!fs.existsSync(labelsDir)) fs.mkdirSync(labelsDir);
+    const sheetName = String(process.env.PM_SHEET_NAME || "").trim();
+    const accountName = String(process.env.PM_ACCOUNT_NAME || "").trim();
+    const tokenFile = String(process.env.PM_TOKEN_FILE || "").trim();
 
-    const files = fs.readdirSync(process.cwd());
-    const tokenFiles = files.filter(f => f.startsWith('token_') && f.endsWith('.json'));
+    if (!SPREADSHEET_ID) throw new Error("Thiếu sheetId trong config.json.");
+    if (!sheetName) throw new Error("Thiếu tên tab Google Sheets.");
+    if (!accountName) throw new Error("Thiếu tên account Poshmark.");
+    if (!/^token_.+\.json$/i.test(tokenFile)) throw new Error("Tên file token Gmail không hợp lệ.");
 
-    if (tokenFiles.length === 0) {
-        console.log("❌ Không tìm thấy file token nào!");
+    const tokenPath = path.join(ROOT, tokenFile);
+    if (!fs.existsSync(tokenPath)) throw new Error(`Không tìm thấy token Gmail: ${tokenFile}`);
+    if (!fs.existsSync(CREDENTIALS_PATH)) throw new Error("Không tìm thấy credentials.json trong thư mục gốc.");
+
+    const labelsDir = path.join(ROOT, 'labels');
+    if (!fs.existsSync(labelsDir)) fs.mkdirSync(labelsDir, { recursive: true });
+
+    try {
+        const auth = await authorize(tokenPath);
+        const stats = await processOrders(auth, accountName, sheetName);
+        logLine("OK", `GET LABEL HOÀN TẤT | Account: ${accountName} | Đã ghi: ${stats?.writtenCount ?? 0} | Bỏ qua: ${stats?.skippedCount ?? 0}`);
+        console.log("────────────────────────────────────────────────");
+    } catch (err) {
+        logLine("ERROR", `Get Label thất bại: ${err.message}`);
+        if (err.response?.data) console.error(JSON.stringify(err.response.data, null, 2));
+        process.exitCode = 1;
+    } finally {
         rl.close();
-        return;
     }
-
-    let selectedTokens = [];
-
-    if (tokenFiles.length > 1) {
-        console.log(`\n🚀 Tìm thấy ${tokenFiles.length} tài khoản. Vui lòng chọn tài khoản muốn xử lý:`);
-        tokenFiles.forEach((file, index) => {
-            const acc = file.replace('token_', '').replace('.json', '');
-            console.log(`   [${index + 1}] ${acc}`);
-        });
-        console.log(`   [0] Chạy TẤT CẢ các tài khoản`);
-
-        let choice = await question(`\n👉 Nhập số (0-${tokenFiles.length}): `);
-        let choiceIndex = parseInt(choice.trim());
-
-        if (!isNaN(choiceIndex) && choiceIndex > 0 && choiceIndex <= tokenFiles.length) {
-            selectedTokens = [tokenFiles[choiceIndex - 1]];
-            console.log(`\n✅ Bạn đã chọn chạy tài khoản: ${selectedTokens[0].replace('token_', '').replace('.json', '')}`);
-        } else {
-            console.log(`\n✅ Bạn đã chọn chạy TẤT CẢ tài khoản.`);
-            selectedTokens = tokenFiles; 
-        }
-    } else {
-        selectedTokens = tokenFiles;
-    }
-
-    for (const tokenFile of selectedTokens) {
-        const defaultAccName = tokenFile.replace('token_', '').replace('.json', '').replace('@gmail.com', '');
-        
-        const inputAcc = await question(`👉 Nhập tên Account muốn điền Cột F (Enter để mặc định): `);
-        const finalAccName = inputAcc.trim() !== "" ? inputAcc.trim() : defaultAccName;
-
-        try {
-            const auth = await authorize(tokenFile);
-            await processOrders(auth, finalAccName);
-        } catch (err) {
-            console.error(`❌ Lỗi xác thực tài khoản [${tokenFile}]:`, err.message);
-        }
-    }
-    
-    console.log("✅ TOÀN BỘ TIẾN TRÌNH ĐÃ HOÀN TẤT!");
-    rl.close();
 }
 
-main();
+main().catch(error => {
+    logLine("ERROR", `Get Label thất bại: ${error.message}`);
+    if (error.response?.data) console.error(JSON.stringify(error.response.data, null, 2));
+    process.exitCode = 1;
+});
