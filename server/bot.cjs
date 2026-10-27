@@ -2,10 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { google } = require('googleapis');
 const cheerio = require('cheerio');
-const readline = require('readline');
-
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-const question = (query) => new Promise((resolve) => rl.question(query, resolve));
+const { createGoogleRequest } = require('./google-request.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const CONFIG_PATH = path.join(ROOT, 'config.json');
@@ -37,11 +34,14 @@ function formatMockupUrl(url) {
     } catch (e) { return url; }
 }
 
-async function processOrders(auth, manualAccountName, sheetName) {
+async function processOrders(auth, manualAccountName, sheetName, options = {}) {
     let writtenCount = 0;
     let skippedCount = 0;
-    const gmail = google.gmail({ version: 'v1', auth });
-    const sheets = google.sheets({ version: 'v4', auth });
+    const gmail = options.gmail || google.gmail({ version: 'v1', auth });
+    const sheets = options.sheets || google.sheets({ version: 'v4', auth });
+    const request = options.request || createGoogleRequest({
+        onRetry: (attempt, delay) => logLine('WARN', `Google giới hạn/tạm lỗi; thử lại ${attempt}/3 sau ${Math.ceil(delay / 1000)} giây.`)
+    });
 
     try {
         logLine("SCAN", `Account: ${manualAccountName} | Đang quét email...`);
@@ -53,17 +53,17 @@ async function processOrders(auth, manualAccountName, sheetName) {
         let existingOrderIds = new Set(); 
 
         try {
-            const response = await sheets.spreadsheets.values.get({
+            const response = await request(requestOptions => sheets.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
                 range: `'${sheetName.replace(/'/g, "''")}'!H:H`,
-            });
+            }, requestOptions));
             const rows = response.data.values;
             let lastDataRow = 1;
             
             if (rows) {
                 for (let r = 0; r < rows.length; r++) {
                     if (rows[r] && rows[r][0]) {
-                        const val = rows[r][0].trim();
+                        const val = String(rows[r][0]).trim().toLowerCase();
                         if (val !== "") {
                             existingOrderIds.add(val); // Lưu ID vào bộ nhớ để chống trùng
                             if (val.toLowerCase() !== "id order") {
@@ -76,13 +76,10 @@ async function processOrders(auth, manualAccountName, sheetName) {
             targetRow = Math.max(lastDataRow + 1, 2);
         } catch (sheetErr) {
             logLine("ERROR", `Không thể đọc Google Sheets: ${sheetErr.message}`);
-            if (sheetErr.response?.data) {
-                console.error(JSON.stringify(sheetErr.response.data, null, 2));
-            }
             throw sheetErr;
         }
 
-        const res = await gmail.users.messages.list({ userId: 'me', q: 'is:unread' });
+        const res = await request(requestOptions => gmail.users.messages.list({ userId: 'me', q: 'is:unread {"Order Number" "Order Date"}', maxResults: 25 }, requestOptions));
         const messages = res.data.messages;
         
         if (!messages || messages.length === 0) {
@@ -94,10 +91,10 @@ async function processOrders(auth, manualAccountName, sheetName) {
 
         for (const msg of messages) {
             const msgId = msg.id;
-            const messageData = await gmail.users.messages.get({ userId: 'me', id: msgId });
+            const messageData = await request(requestOptions => gmail.users.messages.get({ userId: 'me', id: msgId }, requestOptions));
             const payload = messageData.data.payload;
 
-            const subjectHeader = payload.headers.find(h => h.name.toLowerCase() === 'subject');
+            const subjectHeader = (payload.headers || []).find(h => h.name.toLowerCase() === 'subject');
             const subjectTitle = subjectHeader ? subjectHeader.value : "Không rõ tiêu đề";
 
 
@@ -162,6 +159,7 @@ async function processOrders(auth, manualAccountName, sheetName) {
                 orderBlocks = plainText.split(/Order\s*Date/i);
             }
 
+            let canMarkRead = orderBlocks.length > 1;
             if (orderBlocks.length <= 1) {
                 console.log(`  -> ⚠️ BỎ QUA: Thư này không chứa thông tin Đơn Hàng hợp lệ.`);
             } else {
@@ -172,9 +170,10 @@ async function processOrders(auth, manualAccountName, sheetName) {
                     
                     let orderId = '';
                     const orderMatch = block.match(/([a-fA-F0-9]{24})/);
-                    if (orderMatch) orderId = orderMatch[1].trim();
+                    if (orderMatch) orderId = orderMatch[1].trim().toLowerCase();
                     
                     if (!orderId) {
+                        canMarkRead = false;
                         console.log(`  -> ⚠️ LỖI NHỎ: Bắt được Đơn nhưng không tìm thấy Mã Order ID (24 ký tự)!`);
                         continue;
                     }
@@ -265,10 +264,10 @@ async function processOrders(auth, manualAccountName, sheetName) {
                     }
 
                     if (dataToWrite.length > 0) {
-                        await sheets.spreadsheets.values.batchUpdate({
+                        await request(requestOptions => sheets.spreadsheets.values.batchUpdate({
                             spreadsheetId: SPREADSHEET_ID,
                             resource: { valueInputOption: 'USER_ENTERED', data: dataToWrite }
-                        });
+                        }, requestOptions));
                         writtenCount += dataToWrite.length / 11;
                         existingOrderIds.add(orderId);
                         logLine("OK", `Đã ghi đơn ${orderId} vào Sheet.`);
@@ -276,16 +275,19 @@ async function processOrders(auth, manualAccountName, sheetName) {
                 }
             }
 
-            await gmail.users.messages.modify({
+            if (canMarkRead) await request(requestOptions => gmail.users.messages.modify({
                 userId: 'me', id: msgId,
                 resource: { removeLabelIds: ['UNREAD'] }
-            });
+            }, requestOptions));
         }
+        if (res.data.nextPageToken) logLine('INFO', 'Còn email chưa xử lý. Chạy lại để tiếp tục (tối đa 25 email mỗi lần).');
         logLine("OK", `Hoàn tất account ${manualAccountName} | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount}`);
         return { writtenCount, skippedCount };
 
     } catch (error) {
-        logLine("ERROR", `Lỗi trong quá trình xử lý: ${error.message}`);
+        error.partialStats = { writtenCount, skippedCount };
+        logLine("ERROR", `Dừng xử lý | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount} | ${error.message}`);
+        throw error;
     }
 }
 
@@ -305,9 +307,6 @@ async function main() {
     if (!fs.existsSync(tokenPath)) throw new Error(`Không tìm thấy token Gmail: ${tokenFile}`);
     if (!fs.existsSync(CREDENTIALS_PATH)) throw new Error("Không tìm thấy credentials.json trong thư mục gốc.");
 
-    const labelsDir = path.join(ROOT, 'labels');
-    if (!fs.existsSync(labelsDir)) fs.mkdirSync(labelsDir, { recursive: true });
-
     try {
         const auth = await authorize(tokenPath);
         const stats = await processOrders(auth, accountName, sheetName);
@@ -315,15 +314,13 @@ async function main() {
         console.log("────────────────────────────────────────────────");
     } catch (err) {
         logLine("ERROR", `Get Label thất bại: ${err.message}`);
-        if (err.response?.data) console.error(JSON.stringify(err.response.data, null, 2));
         process.exitCode = 1;
-    } finally {
-        rl.close();
     }
 }
 
-main().catch(error => {
+module.exports = { processOrders };
+
+if (require.main === module) main().catch(error => {
     logLine("ERROR", `Get Label thất bại: ${error.message}`);
-    if (error.response?.data) console.error(JSON.stringify(error.response.data, null, 2));
     process.exitCode = 1;
 });

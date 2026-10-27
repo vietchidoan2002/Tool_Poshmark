@@ -8,20 +8,27 @@
     "server": "node server/index.cjs",
     "vite": "vite --host 127.0.0.1",
     "build": "vite build",
-    "start": "node server/index.cjs"
+    "start": "node server/index.cjs",
+    "test": "node --test tests/*.test.*",
+    "test:browser": "node --test tests/browser/cut-label.cjs"
   },
   "dependencies": {
+    "@tesseract.js-data/eng": "1.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "cheerio": "^1.2.0",
     "concurrently": "^9.1.0",
     "express": "^4.21.2",
+    "fflate": "0.8.2",
     "googleapis": "^176.0.0",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^4.10.38",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tesseract.js": "^6.0.1",
+    "tesseract.js-core": "6.1.2",
     "vite": "^6.0.7"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "playwright-core": "1.64.1"
+  }
 }

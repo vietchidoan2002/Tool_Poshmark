@@ -2,14 +2,14 @@
 
 One local app with two pages:
 - **Get Label**: preserves the existing `bot.js` email parsing and Google Sheets column mapping; allows editing the Sheet ID; runs the bot from the UI; persists refreshed OAuth tokens when Google emits them.
-- **Cut Label**: upload PDF labels, attempt to extract the Poshmark 24-character Order ID after `Order #`, fall back to Tesseract.js OCR, edit the ID if needed, and export each page as a 4×6 inch PDF named `<OrderID>.pdf`.
+- **Cut Label**: upload PDF labels, extract the Poshmark 24-character Order ID and USPS tracking, fall back to local Tesseract.js OCR, preview the label, choose a custom output filename, and export 4×6 inch PDFs. Batch export creates one ZIP with a tracking manifest.
 
 ## Windows setup
 1. Install Node.js LTS from https://nodejs.org/.
 2. Extract this folder to a normal location.
 3. Create `config.json` from `config.example.json` (the app can do this on first launch) and enter the Google Sheets ID in the app UI.
 4. Copy your own Google OAuth `credentials.json` into this folder. **Do not share it.** It must have a redirect URI `http://localhost:3210/oauth2callback` registered in Google Cloud Console. Enable Gmail API and Google Sheets API.
-5. Double-click `Start Poshmark Label Manager.bat`. The first run needs internet to install npm packages and download OCR language data.
+5. Double-click `Chạy Tool.bat`. The first run needs internet to install npm packages. OCR worker, core, and English language data are bundled locally by Vite.
 6. Open http://127.0.0.1:5173. In Get Label, click **Kết nối / làm mới Gmail**, sign in, grant Gmail modify and Sheets permissions, then return to the app.
 7. Confirm the Sheet ID, then click **Chạy Get Label**. On Cut Label, upload PDFs and check every ID before exporting.
 
@@ -25,5 +25,34 @@ The original `bot.js` reads unread Gmail messages, parses Poshmark order blocks,
 
 ## Limitations
 - OCR is not infallible. Check Order ID before printing/exporting. It tries to correct common OCR confusions but never trust a result blindly.
-- The cropper detects non-white page bounds and rasterizes the result. Fine print/barcodes may be softer than original vector PDFs; test one label before bulk printing.
+- The cropper detects non-white page bounds and renders at 300 DPI (capped for oversized pages). It preserves aspect ratio inside a 4×6 inch page. Output is rasterized; test one label on your physical printer/scanner before bulk printing.
 - The app binds locally to 127.0.0.1 and is intended for one desktop user.
+
+## Development and regression checks
+
+Use Node.js 24 (validated with 24.19.0) and npm. Run `npm ci`, `npm test`, and `npm run build`. Use `npm run dev` for the Vite frontend and Express API, or `npm start` after building to serve the built frontend and API together. These servers use loopback addresses as described above.
+
+Get Label processes at most 25 unread messages matching `"Order Number"` or `"Order Date"` per run. It spaces Google requests and retries transient/rate-limit responses up to three times, respecting `Retry-After` within its execution budget. If messages remain, run again. Unrelated or incompletely parsed messages stay unread. If processing fails after a write, logs preserve the written/skipped counts and the API reports failure; rows already written remain in Sheets. Rerunning skips IDs present in column H. Do not run simultaneous imports into the same sheet.
+
+Cut Label orders native PDF text using page coordinates. For scanned labels, it tries automatic and sparse OCR layouts. Low-confidence or conflicting Order IDs are left blank with a warning; inspect the extracted text and enter the ID manually. OCR errors preserve the page for manual ID entry/export. Even a high-confidence OCR ID must be checked against the label, since visually similar hexadecimal characters can still be confused.
+
+The automated regression tests mock Google APIs and do not read or change your inbox or Sheets. They cover rate-limit retries, partial failures, duplicate detection, PDF text order, ID extraction and OCR confidence handling.
+
+## Cut Label: filenames, tracking, and exports
+
+1. Upload one or more PDFs (up to 100 MB per file). File names must end in `.pdf`. Corrupt or password-protected files are listed separately; valid neighboring files remain available. Unlock password-protected PDFs before importing them.
+2. The first editable field defaults to the scanned Order ID. The original scanned ID stays visible when you choose a custom filename. Any nonempty custom name is allowed after review; it does not have to be an Order ID.
+3. USPS tracking is displayed below the name, with the original-label preview for visual comparison. Tracking is extracted from printed text, not decoded from the barcode or verified with the USPS service. Missing/conflicting tracking stays blank rather than being invented.
+4. Exporting a short/custom/empty/duplicate/unsupported name opens a review dialog listing the source file, page, reason and exact proposed output name. Choose **Quay lại sửa** (or Escape) to cancel without downloading, or **Tiếp tục xuất** to approve. Missing names fall back to the source filename plus page number. Duplicate names get numeric suffixes; unsupported filename characters are cleaned for Windows compatibility.
+5. **Xuất trang này** downloads one PDF. **Xuất tất cả** downloads a ZIP containing separate PDFs and `danh-sach-label.csv` with source, page, scanned ID, tracking and output filename. A failed page is listed in the UI and in `loi-xuat.txt`; successful pages remain in the ZIP. Blank pages are rejected.
+6. A persistent **Tải lại file** link is available after export. Single-PDF exports also offer **Xem PDF vừa xuất**. These links remain available until the next export, clearing the list, or closing/reloading the app. Processing happens in the browser; reloading the app clears imported PDFs.
+
+OCR has a 45-second time budget per page. It preserves usable results if only one recognition pass fails, warns on unreliable/conflicting IDs, and keeps the page available for manual naming if recognition fails. A single shared PDF worker and disabled import/export controls prevent overlapping operations while processing. Large batches may still need to be split to fit the browser's available memory.
+
+### Browser regression suite
+
+With Chromium installed (default `/usr/bin/chromium`, override with `CHROMIUM_PATH`), run `npm run dev` in another terminal, then `npm run test:browser`. To test a built instance, run `npm run build` and `npm start`, then use `LABEL_TEST_URL=http://127.0.0.1:3210 npm run test:browser`.
+
+The browser suite covers native/scanned labels, custom/default/missing/duplicate names, cancel/Escape, ZIP contents and manifest, valid PDFs surviving corrupt/encrypted neighbors, OCR asset failure, blank-page partial failure, page rotation, clear/re-import, busy controls, actual offline OCR and download/re-download. It verifies exported PDFs parse and have exactly one 4×6 inch page. It mocks the backend and never modifies Gmail or Sheets. The encrypted fixture uses fictional content and password `test-password`.
+
+An optional private reference PDF can be tested using `LABEL_SAMPLE_PDF`, `LABEL_SAMPLE_ORDER_ID` and `LABEL_SAMPLE_TRACKING`; do not commit real shipping labels or credentials. The suite skips this optional check when no sample path is provided. Validation covers these specified cases in Chromium; it does not establish every possible PDF, OCR result, browser or printer behavior.

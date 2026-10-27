@@ -1,34 +1,36 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { PDFDocument } from "pdf-lib";
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createWorker } from "tesseract.js";
 import "./style.css";
+import {
+  extractOrderId,
+  extractUspsTracking,
+  pdfText,
+  recognizeLabel,
+} from "./label-text.js";
+import ocrWorkerUrl from "tesseract.js/dist/worker.min.js?url";
+import ocrCoreUrl from "tesseract.js-core/tesseract-core-lstm.wasm.js?url";
+import englishDataUrl from "@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz?url";
+import { zipSync, strToU8 } from "fflate";
+import {
+  exportPlan,
+  exportManifest,
+  contentBounds,
+  imagePlacement,
+} from "./label-export.js";
+
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+
+let sharedPdfWorker;
+const getPdfWorker = () => (sharedPdfWorker ||= new pdfjsLib.PDFWorker());
 const API = "http://127.0.0.1:3210";
 
-function extractOrderId(text) {
-  const raw = String(text || "")
-    .replace(/[＃♯]/g, "#")
-    .replace(/\u00a0/g, " ");
-
-  const match = raw.match(/Order\s*#\s*([\s\S]{0,120})/i);
-  if (!match) return "";
-
-  let candidate = match[1]
-    .replace(/[\r\n]+/g, "")
-    .replace(/[^a-zA-Z0-9¢©®|!Il]/g, "")
-    .replace(/[¢©®]/g, "c")
-    .replace(/[oO]/g, "0")
-    .replace(/[|!Il]/g, "1")
-    .toLowerCase();
-
-  const id = candidate.match(/[a-f0-9]{24}/);
-  return id ? id[0] : "";
-}
-
 async function renderPage(page, scale = 3) {
+  const base = page.getViewport({ scale: 1 });
+  scale = Math.min(scale, Math.sqrt(12000000 / (base.width * base.height)));
   const viewport = page.getViewport({ scale });
   const canvas = document.createElement("canvas");
   canvas.width = Math.ceil(viewport.width);
@@ -45,97 +47,110 @@ async function renderPage(page, scale = 3) {
 }
 async function ocrPage(page, setStatus) {
   const canvas = await renderPage(page, 3.5);
-  let worker;
-  try {
-    worker = await createWorker("eng", 1, {
-      logger: (m) => {
-        if (m.status === "recognizing text")
-          setStatus(`Đang OCR label… ${Math.round((m.progress || 0) * 100)}%`);
-      },
-    });
-    await worker.setParameters({
-      tessedit_pageseg_mode: "6",
-      preserve_interword_spaces: "1",
-    });
-    const result = await worker.recognize(canvas);
-    return result?.data?.text || "";
-  } finally {
-    if (worker) await worker.terminate();
-  }
+  const langPath = new URL(".", new URL(englishDataUrl, window.location.href))
+    .href;
+  return recognizeLabel(
+    canvas,
+    (lang, mode, options) =>
+      createWorker(lang, mode, {
+        ...options,
+        workerPath: ocrWorkerUrl,
+        corePath: ocrCoreUrl,
+        langPath,
+        errorHandler: () => {},
+      }),
+    setStatus,
+  );
 }
 async function cropToPdf(page) {
-  const canvas = await renderPage(page, 2.5),
-    ctx = canvas.getContext("2d", { willReadFrequently: true });
-  const { width, height } = canvas,
-    data = ctx.getImageData(0, 0, width, height).data;
-  const rows = new Uint32Array(height),
-    cols = new Uint32Array(width);
-  for (let y = 0; y < height; y++)
-    for (let x = 0; x < width; x++) {
-      const i = (y * width + x) * 4;
-      if (data[i] < 225 || data[i + 1] < 225 || data[i + 2] < 225) {
-        rows[y]++;
-        cols[x]++;
-      }
-    }
-  let t = 0,
-    b = height - 1,
-    l = 0,
-    r = width - 1;
-  const rowMin = Math.max(3, Math.floor(width * 0.0004)),
-    colMin = Math.max(3, Math.floor(height * 0.0004));
-  while (t < height - 1 && rows[t] < rowMin) t++;
-  while (b > t && rows[b] < rowMin) b--;
-  while (l < width - 1 && cols[l] < colMin) l++;
-  while (r > l && cols[r] < colMin) r--;
-  const px = Math.round((r - l) * 0.012),
-    py = Math.round((b - t) * 0.012);
-  l = Math.max(0, l - px);
-  r = Math.min(width - 1, r + px);
-  t = Math.max(0, t - py);
-  b = Math.min(height - 1, b + py);
-  const out = document.createElement("canvas");
-  out.width = r - l + 1;
-  out.height = b - t + 1;
-  out
-    .getContext("2d")
-    .drawImage(
-      canvas,
-      l,
-      t,
-      out.width,
-      out.height,
-      0,
-      0,
-      out.width,
-      out.height,
-    );
-  const blob = await new Promise((resolve) => out.toBlob(resolve, "image/png"));
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  const doc = await PDFDocument.create(),
-    img = await doc.embedPng(bytes),
-    p = doc.addPage([288, 432]);
-  p.drawImage(img, { x: 0, y: 0, width: 288, height: 432 });
-  return await doc.save();
-}
-function download(name, bytes) {
-  const url = URL.createObjectURL(
-    new Blob([bytes], { type: "application/pdf" }),
+  // Render at 300 DPI (bounded for oversized PDFs); keep the barcode's aspect ratio.
+  const canvas = await renderPage(page, 300 / 72);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const bounds = contentBounds(
+    ctx.getImageData(0, 0, canvas.width, canvas.height),
   );
+  if (!bounds) throw new Error("Trang trắng, không có nội dung label để xuất.");
+  const blob = await new Promise((resolve) =>
+    canvas.toBlob(resolve, "image/png"),
+  );
+  if (!blob)
+    throw new Error("Không tạo được ảnh label. Hãy thử lại với ít trang hơn.");
+  const doc = await PDFDocument.create();
+  const img = await doc.embedPng(new Uint8Array(await blob.arrayBuffer()));
+  doc
+    .addPage([288, 432])
+    .drawImage(img, imagePlacement(canvas.width, canvas.height, bounds));
+  return doc.save();
+}
+
+function triggerDownload(file) {
   const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
+  a.href = file.url;
+  a.download = file.name;
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 2500);
 }
+
+function ExportReview({ review, onCancel, onConfirm }) {
+  const dialog = useRef(null);
+  useEffect(() => {
+    dialog.current.showModal();
+  }, []);
+  return (
+    <dialog
+      ref={dialog}
+      className="export-review"
+      aria-labelledby="review-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        onCancel();
+      }}
+    >
+      <h3 id="review-title">Kiểm tra tên file trước khi xuất</h3>
+      <p>
+        Các trang dưới đây có tên cần kiểm tra. Bạn có muốn tiếp tục với tên đã
+        hiển thị không?
+      </p>
+      <ul>
+        {review.entries
+          .filter((entry) => entry.warnings.length)
+          .map((entry) => (
+            <li key={entry.job.key + ":" + entry.page.pageNo}>
+              <b>
+                {entry.job.fileName} · trang {entry.page.pageNo}
+              </b>
+              <p>
+                Tên sẽ xuất: <strong>{entry.name}</strong>
+              </p>
+              {entry.warnings.map((warning) => (
+                <p key={warning}>{warning}</p>
+              ))}
+            </li>
+          ))}
+      </ul>
+      <p>
+        Tên tùy chỉnh được phép sử dụng. Tên trống sẽ dùng tên file gốc kèm số
+        trang; tên trùng được thêm số thứ tự.
+      </p>
+      <div className="inlineActions">
+        <button className="secondary" onClick={onCancel} autoFocus>
+          Quay lại sửa
+        </button>
+        <button onClick={onConfirm}>
+          Tiếp tục xuất {review.entries.length} trang
+        </button>
+      </div>
+    </dialog>
+  );
+}
+
 function App() {
   const [page, setPage] = useState("get");
   const [sheetId, setSheetId] = useState("");
   const [accountName, setAccountName] = useState("");
   const [sheetName, setSheetName] = useState(
-    () => localStorage.getItem("pm_default_sheet_name") || ""
+    () => localStorage.getItem("pm_default_sheet_name") || "",
   );
   const [tokenFile, setTokenFile] = useState("");
   const [gmail, setGmail] = useState({
@@ -148,6 +163,25 @@ function App() {
   const [jobs, setJobs] = useState([]);
   const [cutBusy, setCutBusy] = useState(false);
   const [cutMsg, setCutMsg] = useState("");
+  const [importErrors, setImportErrors] = useState([]);
+  const [exportErrors, setExportErrors] = useState([]);
+  const [review, setReview] = useState(null);
+  const [downloadResult, setDownloadResult] = useState(null);
+  const cutLock = useRef(false);
+  const documents = useRef(new Set());
+  useEffect(
+    () => () => {
+      if (downloadResult) URL.revokeObjectURL(downloadResult.url);
+    },
+    [downloadResult],
+  );
+  useEffect(
+    () => () => {
+      for (const document of documents.current)
+        document.destroy().catch(() => {});
+    },
+    [],
+  );
   async function refresh() {
     try {
       const [c, g] = await Promise.all([
@@ -159,7 +193,7 @@ function App() {
       setTokenFile((current) =>
         current && g.accounts?.some((account) => account.file === current)
           ? current
-          : (g.accounts?.[0]?.file || "")
+          : g.accounts?.[0]?.file || "",
       );
     } catch {
       setConfigMsg(
@@ -168,30 +202,30 @@ function App() {
     }
   }
   // xóa token
-async function deleteToken(file, email) {
-  const confirmed = window.confirm(
-    `Bạn có chắc muốn xóa token Gmail ${email}? Bạn sẽ cần kết nối lại để sử dụng tài khoản này.`
-  );
+  async function deleteToken(file, email) {
+    const confirmed = window.confirm(
+      `Bạn có chắc muốn xóa token Gmail ${email}? Bạn sẽ cần kết nối lại để sử dụng tài khoản này.`,
+    );
 
-  if (!confirmed) return;
+    if (!confirmed) return;
 
-  try {
-    const r = await fetch(API + '/api/gmail/delete-token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file })
-    });
+    try {
+      const r = await fetch(API + "/api/gmail/delete-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file }),
+      });
 
-    const data = await r.json();
+      const data = await r.json();
 
-    if (!r.ok) throw new Error(data.error || 'Không thể xóa token.');
+      if (!r.ok) throw new Error(data.error || "Không thể xóa token.");
 
-    setConfigMsg(`Đã xóa token của ${email}.`);
-    await refresh();
-  } catch (error) {
-    setConfigMsg('Lỗi xóa token: ' + error.message);
+      setConfigMsg(`Đã xóa token của ${email}.`);
+      await refresh();
+    } catch (error) {
+      setConfigMsg("Lỗi xóa token: " + error.message);
+    }
   }
-}
 
   function changeSheetName(value) {
     setSheetName(value);
@@ -244,7 +278,10 @@ async function deleteToken(file, email) {
       });
       const d = await r.json();
       setGetOutput(d.output || d.error || "Không có log.");
-      if (!r.ok) setGetOutput((d.error || "Get Label thất bại.") + "\n" + (d.output || ""));
+      if (!r.ok)
+        setGetOutput(
+          (d.error || "Get Label thất bại.") + "\n" + (d.output || ""),
+        );
       await refresh();
     } catch (e) {
       setGetOutput("Lỗi kết nối: " + e.message);
@@ -253,102 +290,231 @@ async function deleteToken(file, email) {
     }
   }
   async function addFiles(fileList) {
-    const files = Array.from(fileList || []).filter((f) =>
-      f.name.toLowerCase().endsWith(".pdf"),
+    if (cutLock.current || review) return;
+    const allFiles = Array.from(fileList || []);
+    const files = allFiles.filter((file) =>
+      file.name.toLowerCase().endsWith(".pdf"),
     );
     if (!files.length) {
-      setCutMsg("Hãy chọn PDF.");
+      setCutMsg("Hãy chọn file PDF.");
       return;
     }
+    cutLock.current = true;
     setCutBusy(true);
     setCutMsg("Đang đọc PDF…");
+    setExportErrors([]);
+    const errors = allFiles
+      .filter((file) => !files.includes(file))
+      .map((file) => `${file.name}: không phải file PDF, đã bỏ qua.`);
+    const next = [];
     try {
-      const next = [];
       for (const file of files) {
-        const data = new Uint8Array(await file.arrayBuffer());
-        const pdf = await pdfjsLib.getDocument({ data }).promise;
-        const pages = [];
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const pg = await pdf.getPage(i);
-          const content = await pg.getTextContent();
-          let text = content.items.map((x) => x.str).join(" ");
-          let id = extractOrderId(text);
-          if (!id) {
-            setCutMsg(`Đang thử OCR: ${file.name} trang ${i}/${pdf.numPages}`);
-            const ocr = await ocrPage(pg, setCutMsg);
-            text = [text, ocr].filter(Boolean).join("\n");
-            id = extractOrderId(ocr) || extractOrderId(text);
+        let pdf, loading;
+        try {
+          if (file.size > 100 * 1024 * 1024)
+            throw new Error("File lớn hơn 100 MB. Hãy chia nhỏ PDF.");
+          loading = pdfjsLib.getDocument({
+            data: new Uint8Array(await file.arrayBuffer()),
+            worker: getPdfWorker(),
+          });
+          pdf = await loading.promise;
+          const pages = [];
+          for (let i = 1; i <= pdf.numPages; i++) {
+            try {
+              const pg = await pdf.getPage(i);
+              let nativeText = "";
+              try {
+                const content = await pg.getTextContent();
+                const alternatives = [
+                  pdfText(content, pg.getViewport({ scale: 1 })),
+                  pdfText(content),
+                ];
+                const score = (text) =>
+                  (extractOrderId(text) ? 2 : 0) +
+                  (extractUspsTracking(text) ? 1 : 0);
+                nativeText = alternatives.sort(
+                  (a, b) => score(b) - score(a),
+                )[0];
+              } catch {
+                /* Image OCR can still work. */
+              }
+              let text = nativeText;
+              let id = extractOrderId(text);
+              let tracking = extractUspsTracking(text);
+              let source = "PDF",
+                ocrError = "",
+                preview = "";
+              // An Order ID alone is insufficient for the tracking cross-check.
+              if (!id || !tracking) {
+                setCutMsg(
+                  `Đang OCR: ${file.name} · trang ${i}/${pdf.numPages}`,
+                );
+                try {
+                  const result = await ocrPage(pg, setCutMsg);
+                  text = result.text || nativeText;
+                  id = id || result.orderId;
+                  tracking = tracking || result.tracking;
+                  ocrError = result.warning || "";
+                  source = result.text ? "OCR" : "PDF";
+                } catch (error) {
+                  ocrError =
+                    "Không đọc được OCR: " +
+                    (error?.message || String(error)) +
+                    ". Bạn vẫn có thể nhập tên để xuất trang.";
+                }
+              }
+              try {
+                preview = (await renderPage(pg, 1.3)).toDataURL(
+                  "image/jpeg",
+                  0.85,
+                );
+              } catch {
+                ocrError += " Không tạo được ảnh xem trước.";
+              }
+              pages.push({
+                pageNo: i,
+                pdfPage: pg,
+                text,
+                nativeText,
+                source,
+                ocrError,
+                orderId: id,
+                outputName: id,
+                tracking,
+                preview,
+              });
+            } catch (error) {
+              errors.push(
+                `${file.name} · trang ${i}: ${error.message || String(error)}`,
+              );
+            }
           }
-          pages.push({ pageNo: i, pdfPage: pg, text, orderId: id });
+          if (pages.length) {
+            documents.current.add(pdf);
+            next.push({ key: crypto.randomUUID(), fileName: file.name, pages });
+          } else {
+            await pdf.destroy();
+          }
+        } catch (error) {
+          const reason =
+            error.name === "PasswordException"
+              ? "PDF có mật khẩu. Hãy mở khóa file trước khi tải lên."
+              : error.name === "InvalidPDFException"
+                ? "PDF hỏng hoặc không đúng định dạng."
+                : error.message || String(error);
+          errors.push(`${file.name}: ${reason}`);
+          if (loading) await loading.destroy().catch(() => {});
         }
-        next.push({
-          key:
-            file.name +
-            "-" +
-            file.size +
-            "-" +
-            Date.now() +
-            "-" +
-            Math.random(),
-          fileName: file.name,
-          pages,
-        });
       }
-      setJobs((prev) => [...prev, ...next]);
+      setJobs((previous) => [...previous, ...next]);
+      setImportErrors(errors);
       setCutMsg(
-        `Đã đọc ${files.length} file. Hãy kiểm tra Order ID trước khi xuất.`,
+        `Đã thêm ${next.length} file, ${next.reduce((sum, job) => sum + job.pages.length, 0)} trang. Kiểm tra Order ID và USPS tracking trước khi xuất.`,
       );
-    } catch (e) {
-      setCutMsg("Lỗi đọc PDF/OCR: " + e.message);
     } finally {
+      cutLock.current = false;
       setCutBusy(false);
     }
   }
   function updateId(key, pageNo, value) {
-    setJobs((prev) =>
-      prev.map((j) =>
-        j.key !== key
-          ? j
+    if (cutLock.current) return;
+    setJobs((previous) =>
+      previous.map((job) =>
+        job.key !== key
+          ? job
           : {
-              ...j,
-              pages: j.pages.map((p) =>
-                p.pageNo !== pageNo ? p : { ...p, orderId: value },
+              ...job,
+              pages: job.pages.map((p) =>
+                p.pageNo !== pageNo ? p : { ...p, outputName: value },
               ),
             },
       ),
     );
   }
-  async function exportPage(job, p) {
-    const id = String(p.orderId || "").trim();
-    if (!/^[a-f0-9]{24}$/i.test(id)) {
-      setCutMsg(
-        `Trang ${p.pageNo}: Order ID phải gồm 24 ký tự hex. Kiểm tra hoặc nhập lại.`,
-      );
-      return;
-    }
+  function clearJobs() {
+    if (cutLock.current) return;
+    for (const document of documents.current)
+      document.destroy().catch(() => {});
+    documents.current.clear();
+    setJobs([]);
+    setReview(null);
+    setImportErrors([]);
+    setExportErrors([]);
+    setDownloadResult(null);
+    setCutMsg("Đã xóa danh sách.");
+  }
+  async function runExport(entries, batch) {
+    if (cutLock.current) return;
+    cutLock.current = true;
+    setReview(null);
     setCutBusy(true);
-    setCutMsg("Đang cắt label…");
+    setExportErrors([]);
+    setDownloadResult(null);
+    const failures = [],
+      successful = [],
+      archive = Object.create(null);
     try {
-      const bytes = await cropToPdf(p.pdfPage);
-      download(id + ".pdf", bytes);
-      setCutMsg("Đã xuất " + id + ".pdf");
-    } catch (e) {
-      setCutMsg("Lỗi xuất PDF: " + e.message);
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        setCutMsg(`Đang xuất ${i + 1}/${entries.length}: ${entry.name}`);
+        try {
+          const bytes = await cropToPdf(entry.page.pdfPage);
+          archive[entry.name] = bytes;
+          successful.push(entry);
+        } catch (error) {
+          failures.push(
+            `${entry.job.fileName} · trang ${entry.page.pageNo}: ${error.message || String(error)}`,
+          );
+        }
+      }
+      if (!successful.length) {
+        setCutMsg("Không xuất được trang nào. Xem lỗi bên dưới.");
+        return;
+      }
+      if (batch) {
+        archive["danh-sach-label.csv"] = strToU8(exportManifest(successful));
+        if (failures.length)
+          archive["loi-xuat.txt"] = strToU8(failures.join("\n"));
+      }
+      const bytes = batch
+        ? zipSync(archive, { level: 0 })
+        : archive[successful[0].name];
+      const result = {
+        name: batch ? "poshmark-labels.zip" : successful[0].name,
+        url: URL.createObjectURL(
+          new Blob([bytes], {
+            type: batch ? "application/zip" : "application/pdf",
+          }),
+        ),
+        batch,
+      };
+      setDownloadResult(result);
+      triggerDownload(result);
+      setCutMsg(
+        `Đã xuất ${successful.length}/${entries.length} trang${failures.length ? `; ${failures.length} trang lỗi` : ""}. ${batch ? "Giải nén ZIP để lấy PDF và bảng đối chiếu tracking." : "Bạn có thể xem PDF hoặc tải lại bên dưới."}`,
+      );
+    } catch (error) {
+      failures.push(error.message || String(error));
+      setCutMsg(
+        "Không hoàn tất xuất file. Xem lỗi bên dưới và thử lại với ít trang hơn.",
+      );
     } finally {
+      setExportErrors(failures);
+      cutLock.current = false;
       setCutBusy(false);
     }
   }
-  async function exportAll() {
-    for (const job of jobs)
-      for (const p of job.pages) {
-        if (!/^[a-f0-9]{24}$/i.test(String(p.orderId || "").trim())) {
-          setCutMsg(
-            `Còn Order ID chưa hợp lệ: ${job.fileName}, trang ${p.pageNo}. Sửa trước khi xuất tất cả.`,
-          );
-          return;
-        }
-      }
-    for (const job of jobs) for (const p of job.pages) await exportPage(job, p);
+  function requestExport(only) {
+    if (cutLock.current || review) return;
+    const entries = exportPlan(jobs, only);
+    if (!entries.length) {
+      setCutMsg("Chưa có trang để xuất.");
+      return;
+    }
+    const batch = !only;
+    if (entries.some((entry) => entry.warnings.length))
+      setReview({ entries, batch });
+    else runExport(entries, batch);
   }
   return (
     <div className="app">
@@ -420,29 +586,29 @@ async function deleteToken(file, email) {
                 mục gốc theo README.
               </p>
             )}
-            {
-gmail.accounts?.length ? gmail.accounts.map(a => (
-  <div className="account" key={a.file}>
-    <span className="dot" />
-    <div className="accountInfo">
-      <b>{a.email}</b>
-      <small>
-        {a.hasRefreshToken
-          ? 'Có refresh token — tự làm mới khi hết hạn'
-          : 'Không có refresh token — có thể cần kết nối lại'}
-      </small>
-    </div>
-    <button
-      className="danger small"
-      onClick={() => deleteToken(a.file, a.email)}
-    >
-      Xóa token
-    </button>
-  </div>
-)) : (
-  <p className="muted">Chưa có token Gmail được kết nối.</p>
-)
-}
+            {gmail.accounts?.length ? (
+              gmail.accounts.map((a) => (
+                <div className="account" key={a.file}>
+                  <span className="dot" />
+                  <div className="accountInfo">
+                    <b>{a.email}</b>
+                    <small>
+                      {a.hasRefreshToken
+                        ? "Có refresh token — tự làm mới khi hết hạn"
+                        : "Không có refresh token — có thể cần kết nối lại"}
+                    </small>
+                  </div>
+                  <button
+                    className="danger small"
+                    onClick={() => deleteToken(a.file, a.email)}
+                  >
+                    Xóa token
+                  </button>
+                </div>
+              ))
+            ) : (
+              <p className="muted">Chưa có token Gmail được kết nối.</p>
+            )}
             <div className="inlineActions">
               <button
                 onClick={() =>
@@ -486,15 +652,21 @@ gmail.accounts?.length ? gmail.accounts.map(a => (
             </label>
             <label className="field">
               Tài khoản Gmail
-              <select value={tokenFile} onChange={(e) => setTokenFile(e.target.value)}>
+              <select
+                value={tokenFile}
+                onChange={(e) => setTokenFile(e.target.value)}
+              >
                 <option value="">-- Chọn Gmail --</option>
                 {gmail.accounts?.map((account) => (
-                  <option key={account.file} value={account.file}>{account.email}</option>
+                  <option key={account.file} value={account.file}>
+                    {account.email}
+                  </option>
                 ))}
               </select>
             </label>
             <p className="hint">
-              Tên account Poshmark không được lưu. Tên tab sẽ được lưu trên máy và tự điền lần sau.
+              Tên account Poshmark không được lưu. Tên tab sẽ được lưu trên máy
+              và tự điền lần sau.
             </p>
           </section>
           <section className="runbox">
@@ -506,7 +678,14 @@ gmail.accounts?.length ? gmail.accounts.map(a => (
               </p>
             </div>
             <button
-              disabled={getBusy || !sheetId || !gmail.accounts?.length || !accountName.trim() || !sheetName.trim() || !tokenFile}
+              disabled={
+                getBusy ||
+                !sheetId ||
+                !gmail.accounts?.length ||
+                !accountName.trim() ||
+                !sheetName.trim() ||
+                !tokenFile
+              }
               onClick={runGet}
             >
               {getBusy ? "Đang chạy…" : "Chạy Get Label"}
@@ -561,10 +740,47 @@ gmail.accounts?.length ? gmail.accounts.map(a => (
             <b>Kéo thả PDF vào đây hoặc bấm để chọn</b>
             <small>PDF nhiều trang · OCR chạy trong trình duyệt</small>
           </label>
-          <div className="status">
+          <div className="status" role="status" aria-live="polite">
             {cutBusy && <span className="spinner" />}
             {cutMsg || "Chưa có file nào được thêm."}
           </div>
+          {importErrors.length > 0 && (
+            <section className="warning" role="alert">
+              <b>Các file/trang chưa đọc được</b>
+              <ul>
+                {importErrors.map((error, i) => (
+                  <li key={i}>{error}</li>
+                ))}
+              </ul>
+            </section>
+          )}
+          {exportErrors.length > 0 && (
+            <section className="warning" role="alert">
+              <b>Các trang xuất bị lỗi</b>
+              <ul>
+                {exportErrors.map((error, i) => (
+                  <li key={i}>{error}</li>
+                ))}
+              </ul>
+            </section>
+          )}
+          {downloadResult && (
+            <div className="download-result" role="status">
+              <b>{downloadResult.name}</b>
+              <a href={downloadResult.url} download={downloadResult.name}>
+                Tải lại file
+              </a>
+              {!downloadResult.batch && (
+                <a
+                  href={downloadResult.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Xem PDF vừa xuất
+                </a>
+              )}
+            </div>
+          )}
           {jobs.length > 0 && (
             <>
               <div className="linehead listHead">
@@ -578,14 +794,12 @@ gmail.accounts?.length ? gmail.accounts.map(a => (
                 <div className="inlineActions">
                   <button
                     className="secondary"
-                    onClick={() => {
-                      setJobs([]);
-                      setCutMsg("Đã xóa danh sách.");
-                    }}
+                    onClick={clearJobs}
+                    disabled={cutBusy}
                   >
                     Xóa danh sách
                   </button>
-                  <button onClick={exportAll} disabled={cutBusy}>
+                  <button onClick={() => requestExport()} disabled={cutBusy}>
                     Xuất tất cả
                   </button>
                 </div>
@@ -602,32 +816,78 @@ gmail.accounts?.length ? gmail.accounts.map(a => (
                       <div className="linehead">
                         <b>Trang {p.pageNo}</b>
                         <span
-                          className={p.orderId ? "pill green" : "pill warn"}
+                          className={
+                            p.orderId && p.source !== "OCR"
+                              ? "pill green"
+                              : "pill warn"
+                          }
                         >
-                          {p.orderId ? "Đã nhận diện" : "Cần kiểm tra ID"}
+                          {p.orderId
+                            ? p.source === "OCR"
+                              ? "OCR · cần đối chiếu ID"
+                              : "Đã nhận diện"
+                            : "Cần kiểm tra ID"}
                         </span>
                       </div>
                       <label className="field">
-                        Order ID / tên file
+                        Tên file xuất (mặc định là Order ID)
                         <input
-                          value={p.orderId}
+                          value={p.outputName}
+                          disabled={cutBusy}
                           onChange={(e) =>
                             updateId(job.key, p.pageNo, e.target.value)
                           }
-                          placeholder="24 ký tự hex sau Order #"
+                          placeholder="Order ID 24 ký tự hoặc tên tùy chỉnh"
                         />
-                        <small>{p.orderId || "Chưa có ID"}.pdf</small>
+                        <small>
+                          Order ID đã quét: {p.orderId || "Chưa nhận diện được"}
+                        </small>
                       </label>
+                      <div className="tracking-check">
+                        <b>USPS tracking · đối chiếu</b>
+                        <output>
+                          {p.tracking
+                            ? p.tracking.replace(/(\d{4})(?=\d)/g, "$1 ")
+                            : "Chưa đọc được mã tracking"}
+                        </output>
+                        <small>
+                          Đọc từ label, chưa xác minh với USPS. So sánh với mã
+                          dưới barcode.
+                        </small>
+                      </div>
+                      {p.preview && (
+                        <details className="label-preview">
+                          <summary>Xem label gốc để đối chiếu</summary>
+                          <img
+                            src={p.preview}
+                            alt={`Label gốc · ${job.fileName} · trang ${p.pageNo}`}
+                            loading="lazy"
+                          />
+                        </details>
+                      )}
+                      {p.ocrError && (
+                        <p role="alert" className="warning">
+                          {p.ocrError}
+                        </p>
+                      )}
                       <div className="inlineActions">
                         <button
-                          onClick={() => exportPage(job, p)}
-                          disabled={cutBusy || !p.orderId}
+                          onClick={() =>
+                            requestExport({ jobKey: job.key, pageNo: p.pageNo })
+                          }
+                          disabled={cutBusy}
                         >
                           Xuất trang này
                         </button>
                         <details>
-                          <summary>Xem text OCR</summary>
+                          <summary>Xem text đã đọc ({p.source})</summary>
                           <pre>{p.text || "Không có text đọc được."}</pre>
+                          {p.source === "OCR" && p.nativeText && (
+                            <>
+                              <p>Text gốc PDF</p>
+                              <pre>{p.nativeText}</pre>
+                            </>
+                          )}
                         </details>
                       </div>
                     </div>
@@ -637,6 +897,13 @@ gmail.accounts?.length ? gmail.accounts.map(a => (
             </>
           )}
         </main>
+      )}
+      {review && (
+        <ExportReview
+          review={review}
+          onCancel={() => setReview(null)}
+          onConfirm={() => runExport(review.entries, review.batch)}
+        />
       )}
     </div>
   );
