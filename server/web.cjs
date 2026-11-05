@@ -125,6 +125,13 @@ async function createWebApp(config, deps = {}) {
     standardHeaders: "draft-8",
     legacyHeaders: false,
   });
+  const { mountPasswordAuth } = require("./password-auth.cjs");
+  const passwordAuth = await mountPasswordAuth(app, pool, config, {
+    ...deps,
+    userStore: store,
+    oauthFactory: oauth,
+  });
+  store.isVerified = passwordAuth.isVerified;
   app.get("/api/session", (req, res) =>
     res.json({
       webMode: true,
@@ -136,11 +143,20 @@ async function createWebApp(config, deps = {}) {
     "/api/auth/start",
     loginLimit,
     asyncRoute(async (req, res) => {
+      if (
+        req.session.userId &&
+        !(await passwordAuth.isVerified(req.session.userId))
+      )
+        return res
+          .status(403)
+          .send("Hãy xác nhận email tài khoản trước khi kết nối Google.");
       const auth = oauth();
       const { codeVerifier, codeChallenge } =
         await auth.generateCodeVerifierAsync();
       const state = crypto.randomBytes(32).toString("base64url");
       req.session.oauth = {
+        userId: req.session.userId || null,
+        remember: req.session.cookie.originalMaxAge !== null,
         state,
         codeVerifier,
         expires: Date.now() + 10 * 60000,
@@ -209,10 +225,38 @@ async function createWebApp(config, deps = {}) {
       const identity = ticket.getPayload();
       if (!identity?.sub || !identity.email || !identity.email_verified)
         throw Error("Unverified Google identity");
-      await store.connect(identity.sub, identity.email, tokens);
-      await rotateSession(req);
-      req.session.userId = identity.sub;
-      await saveSession(req);
+      await passwordAuth.checkSession(req);
+      if (pending.userId && req.session.userId !== pending.userId)
+        return res
+          .status(400)
+          .send("Phiên tài khoản đã thay đổi. Hãy kết nối lại.");
+      const ownerId = pending.userId || identity.sub;
+      const owner = pending.userId ? await store.get(ownerId) : null;
+      await store.connect(ownerId, owner?.email || identity.email, {
+        ...tokens,
+        pm_connected_email: identity.email,
+      });
+      const account = await passwordAuth.accounts.get(ownerId);
+      if (
+        account &&
+        account.email.toLowerCase() === identity.email.toLowerCase()
+      )
+        await pool.query(
+          "UPDATE pm_password_accounts SET email_verified=true WHERE user_id=$1",
+          [ownerId],
+        );
+      if (pending.userId && account) {
+        await passwordAuth.authenticate(
+          req,
+          ownerId,
+          pending.remember === true,
+        );
+      } else {
+        await rotateSession(req);
+        req.session.userId = ownerId;
+        req.session.authVersion = account?.auth_version;
+        await saveSession(req);
+      }
       res.redirect("/");
     }),
   );
@@ -274,7 +318,7 @@ async function createWebApp(config, deps = {}) {
           ? [
               {
                 file: "personal",
-                email: user.email,
+                email: tokens.pm_connected_email || user.email,
                 hasRefreshToken: !!tokens.refresh_token,
                 expiryDate: tokens.expiry_date || null,
               },
@@ -303,6 +347,10 @@ async function createWebApp(config, deps = {}) {
               "Hãy lưu số điện thoại và chờ quản trị viên kiểm tra trước khi chạy Get Label.",
           });
       }
+      if (!(await passwordAuth.isVerified(req.session.userId)))
+        return res
+          .status(403)
+          .json({ error: "Hãy xác nhận email trước khi chạy Get Label." });
       const user = await store.get(req.session.userId);
       if (!user?.sheet_id || !user.tokens)
         return res
@@ -328,7 +376,11 @@ async function createWebApp(config, deps = {}) {
       const refreshWrites = [];
       try {
         const auth = oauth();
-        auth.setCredentials(store.decrypt(user.tokens, user.id));
+        const { pm_connected_email, ...googleCredentials } = store.decrypt(
+          user.tokens,
+          user.id,
+        );
+        auth.setCredentials(googleCredentials);
         auth.on("tokens", (tokens) => {
           refreshWrites.push(
             store.refresh(user.id, user.token_version, tokens).then(
@@ -419,6 +471,10 @@ if (require.main === module) {
     baseUrl,
     adminEmails: process.env.ADMIN_EMAILS,
     requirePhoneReview: process.env.REQUIRE_REVIEWED_PHONE === "true",
+    mailProvider: process.env.AUTH_MAIL_PROVIDER,
+    mailSenderEmail: process.env.AUTH_MAIL_SENDER_EMAIL,
+    resendKey: process.env.RESEND_API_KEY,
+    emailFrom: process.env.AUTH_EMAIL_FROM,
     clientId: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     sessionSecret: process.env.SESSION_SECRET,

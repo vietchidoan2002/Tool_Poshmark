@@ -660,27 +660,27 @@ test("phone admin can list, edit, review and cancel or confirm deletion", async 
   );
 });
 
-test("web login and registration are visible from Cut Label and use the Google account flow", async (t) => {
+test("web login and registration open real forms while Google remains an alternative", async (t) => {
   const page = await open(t, { webMode: true });
+  await page.getByRole("button", { name: "Đăng ký", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "Tạo tài khoản", exact: true })
+    .waitFor();
   assert.equal(
-    await page
-      .getByRole("button", { name: "Đăng nhập", exact: true })
-      .isVisible(),
+    await page.getByLabel("Họ và tên", { exact: true }).isVisible(),
     true,
   );
-  assert.equal(
-    await page
-      .getByRole("button", { name: "Đăng ký", exact: true })
-      .isVisible(),
-    true,
-  );
+  await page.getByRole("button", { name: "Đăng nhập", exact: true }).click();
+  await page.getByRole("heading", { name: "Đăng nhập", exact: true }).waitFor();
   await page.route("**/api/auth/start", (route) =>
     route.fulfill({
       contentType: "text/html",
       body: "Test Google authentication entrypoint",
     }),
   );
-  await page.getByRole("button", { name: "Đăng ký", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Tiếp tục với Google", exact: true })
+    .click();
   await page.waitForURL("**/api/auth/start");
 });
 
@@ -697,4 +697,99 @@ test("failed session lookup is visible and retry restores login without discardi
     await page.getByRole("button", { name: "Thử lại kết nối" }).count(),
     0,
   );
+});
+
+test("auth forms show/hide passwords, validate confirmation and terms, and switch to recovery", async (t) => {
+  const page = await open(t, { webMode: true });
+  await page.route("**/api/auth/options", (r) =>
+    r.fulfill({ json: { passwordAuth: true, emailConfigured: true } }),
+  );
+  await page.getByRole("button", { name: "Đăng ký", exact: true }).click();
+  await page.getByLabel("Họ và tên", { exact: true }).fill("Test User");
+  await page.getByLabel("Email", { exact: true }).fill("test@example.test");
+  const password = page.getByLabel("Mật khẩu", { exact: true });
+  await password.fill("test-password");
+  await page
+    .getByRole("button", { name: "Hiện mật khẩu", exact: true })
+    .click();
+  assert.equal(await password.getAttribute("type"), "text");
+  await page.getByRole("button", { name: "Ẩn mật khẩu", exact: true }).click();
+  assert.equal(await password.getAttribute("type"), "password");
+  await page
+    .getByLabel("Xác nhận mật khẩu", { exact: true })
+    .fill("different-password");
+  await page.getByRole("checkbox").check();
+  await page
+    .getByRole("button", { name: "Tạo tài khoản", exact: true })
+    .click();
+  assert.match(await page.getByRole("alert").textContent(), /không khớp/);
+  await page.getByRole("button", { name: "Đăng nhập", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Quên mật khẩu?", exact: true })
+    .click();
+  await page
+    .getByRole("heading", { name: "Quên mật khẩu?", exact: true })
+    .waitFor();
+  await page.getByLabel("Email", { exact: true }).fill("test@example.test");
+  await page.route("**/api/auth/forgot-password", (r) =>
+    r.fulfill({
+      json: {
+        ok: true,
+        message: "Nếu email có tài khoản, hướng dẫn đã được gửi.",
+      },
+    }),
+  );
+  await page.getByRole("button", { name: "Gửi liên kết khôi phục" }).click();
+  assert.match(await page.getByRole("status").textContent(), /Nếu email/);
+});
+
+test("sign-in shows server failures and submits Remember me without logging passwords", async (t) => {
+  const page = await open(t, { webMode: true });
+  await page.getByRole("button", { name: "Đăng nhập", exact: true }).click();
+  await page.getByLabel("Email", { exact: true }).fill("test@example.test");
+  await page.getByLabel("Mật khẩu", { exact: true }).fill("test-password");
+  await page.getByLabel("Ghi nhớ đăng nhập").check();
+  let payload;
+  await page.route("**/api/auth/login", (r) => {
+    payload = r.request().postDataJSON();
+    return r.fulfill({
+      status: 401,
+      json: { error: "Email hoặc mật khẩu không đúng." },
+    });
+  });
+  await page.getByRole("button", { name: "Đăng nhập", exact: true }).click();
+  await page.getByRole("alert").waitFor();
+  assert.equal(payload.remember, true);
+  assert.match(await page.getByRole("alert").textContent(), /không đúng/);
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Đăng nhập", exact: true })
+      .isEnabled(),
+    true,
+  );
+});
+
+test("mobile auth page fits the viewport and resets password with a one-time fragment token", async (t) => {
+  const page = await open(t, { webMode: true });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.route("**/api/auth/reset-password", (r) =>
+    r.fulfill({ json: { ok: true } }),
+  );
+  await page.evaluate(() => {
+    window.location.hash = "/reset-password?token=test-token";
+  });
+  await page.getByRole("heading", { name: "Đặt lại mật khẩu" }).waitFor();
+  assert.ok(!page.url().includes("token="));
+  assert.equal(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+    true,
+  );
+  await page.getByLabel("Mật khẩu", { exact: true }).fill("new-test-password");
+  await page
+    .getByLabel("Xác nhận mật khẩu", { exact: true })
+    .fill("new-test-password");
+  await page.getByRole("button", { name: "Lưu mật khẩu mới" }).click();
+  assert.match(await page.getByRole("status").textContent(), /Đã đổi mật khẩu/);
 });

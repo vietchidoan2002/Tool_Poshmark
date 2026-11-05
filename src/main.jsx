@@ -6,6 +6,7 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createWorker } from "tesseract.js";
 import "./style.css";
 import PhoneManager from "./PhoneManager.jsx";
+import AuthPage, { AccountNotice } from "./AuthPage.jsx";
 import {
   extractOrderId,
   extractUspsTracking,
@@ -155,7 +156,65 @@ function ExportReview({ review, onCancel, onConfirm }) {
   );
 }
 
+function readAuthRoute() {
+  const mode = window.location.hash.replace(/^#\/?/, "").split("?")[0];
+  return [
+    "login",
+    "register",
+    "forgot",
+    "reset-password",
+    "verify-email",
+    "terms",
+    "privacy",
+  ].includes(mode)
+    ? mode
+    : null;
+}
 function App() {
+  const [authView, setAuthView] = useState(readAuthRoute);
+  const authToken = useRef(
+    new URLSearchParams(window.location.hash.split("?")[1] || "").get(
+      "token",
+    ) || "",
+  );
+  const verifyPending = useRef(readAuthRoute() === "verify-email");
+  useEffect(() => {
+    const change = () => {
+      const route = readAuthRoute();
+      const token = new URLSearchParams(
+        window.location.hash.split("?")[1] || "",
+      ).get("token");
+      if (token) {
+        authToken.current = token;
+        verifyPending.current = route === "verify-email";
+        window.history.replaceState(
+          null,
+          "",
+          window.location.pathname + window.location.search + "#/" + route,
+        );
+      }
+      setAuthView(route);
+    };
+    change();
+    window.addEventListener("hashchange", change);
+    return () => window.removeEventListener("hashchange", change);
+  }, []);
+  function openAuth(mode) {
+    setAuthView(mode);
+    window.history.pushState(
+      null,
+      "",
+      mode ? "#/" + mode : window.location.pathname + window.location.search,
+    );
+  }
+  async function authCompleted(mode) {
+    if (mode === "verify-email") {
+      verifyPending.current = false;
+      authToken.current = "";
+    }
+    openAuth(verifyPending.current ? "verify-email" : null);
+    await refresh();
+  }
   const [page, setPage] = useState(PREVIEW_ONLY ? "cut" : "get");
   const [webMode, setWebMode] = useState(PREVIEW_ONLY);
   const [authenticated, setAuthenticated] = useState(false);
@@ -631,6 +690,17 @@ function App() {
       setReview({ entries, batch });
     else runExport(entries, batch);
   }
+  if (authView && !PREVIEW_ONLY)
+    return (
+      <AuthPage
+        mode={authView}
+        token={authToken.current}
+        onNavigate={openAuth}
+        onBack={() => openAuth(null)}
+        onAuth={authCompleted}
+        onGoogle={connectGoogle}
+      />
+    );
   return (
     <div className="app">
       <header className="top">
@@ -641,10 +711,10 @@ function App() {
         </div>
         {!PREVIEW_ONLY && webMode && !authenticated && (
           <div className="account-actions">
-            <button className="secondary" onClick={connectGoogle}>
+            <button className="secondary" onClick={() => openAuth("login")}>
               Đăng nhập
             </button>
-            <button onClick={connectGoogle}>Đăng ký</button>
+            <button onClick={() => openAuth("register")}>Đăng ký</button>
           </div>
         )}
       </header>
@@ -657,6 +727,7 @@ function App() {
           </button>
         </aside>
       )}
+      {webMode && authenticated && <AccountNotice key={authUser.current} />}
       {webMode && authenticated && (
         <div className="inlineActions">
           <button className="secondary" onClick={logout} disabled={getBusy}>
@@ -718,11 +789,18 @@ function App() {
               <p>
                 {PREVIEW_ONLY
                   ? "Bản xem thử chưa bật tài khoản Google. Chọn Cut Label để thử quét và xuất PDF ngay trong trình duyệt."
-                  : "Dùng Google để đăng nhập. Lần đầu kết nối sẽ tự tạo tài khoản, sau đó bạn nhập số điện thoại và Sheet ID riêng. Không cần tạo mật khẩu mới. Bạn vẫn có thể dùng Cut Label mà không đăng nhập."}
+                  : "Đăng nhập hoặc đăng ký bằng email và mật khẩu. Sau khi xác nhận email, bạn kết nối Gmail/Sheets riêng. Tài khoản Google cũ vẫn đăng nhập được bằng tùy chọn Google."}
               </p>
               <div className="inlineActions">
                 {!PREVIEW_ONLY && (
-                  <button onClick={connectGoogle}>Đăng nhập bằng Google</button>
+                  <>
+                    <button onClick={() => openAuth("login")}>
+                      Mở trang đăng nhập
+                    </button>
+                    <button className="secondary" onClick={connectGoogle}>
+                      Đăng nhập bằng Google
+                    </button>
+                  </>
                 )}
               </div>
             </section>

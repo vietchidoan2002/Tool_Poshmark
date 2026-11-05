@@ -68,3 +68,7 @@ The separate `npm run start:web` entrypoint implements Google login, user-scoped
 For Gmail/Sheets without choosing paid infrastructure, follow [RENDER-SETUP.md](docs/RENDER-SETUP.md). The free web service is separate from the static Cut Label preview. Google OAuth secrets and the Neon direct database URL must be set securely in Render Environment; the static site cannot host those APIs. Free plans have quotas/sleep behavior, and live provider configuration must still be verified.
 
 Phone management is available only in authenticated web mode. ADMIN_EMAILS selects administrators using verified Google email addresses. Users can save only their own normalized phone; administrators can search, edit, delete and manually review phones. REQUIRE_REVIEWED_PHONE=true gates Get Label on manual review, not Cut Label. Formatting checks are not SMS verification or proof of SIM ownership. Review setup and schema notes in docs/RENDER-SETUP.md.
+
+## Email/password account pages
+
+The full web service now includes dedicated sign-in, sign-up, forgot/reset password and email verification pages. See [EMAIL-PASSWORD-AUTH.md](docs/EMAIL-PASSWORD-AUTH.md) for cookie lifetimes, email delivery setup, Google-account compatibility and recovery. Gmail/Sheets connection stays separate from website credentials. Admin Gmail API delivery is opt-in through AUTH_MAIL_PROVIDER=gmail and AUTH_MAIL_SENDER_EMAIL; existing OAuth/SMTP credentials are not automatically used to send emails. Missing mail setup is shown in the UI.

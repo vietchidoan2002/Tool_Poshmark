@@ -39,6 +39,14 @@ async function createWebStore(pool, secret) {
       return (await pool.query("SELECT * FROM pm_users WHERE id=$1", [id]))
         .rows[0];
     },
+    async findByEmail(email) {
+      return (
+        await pool.query(
+          "SELECT * FROM pm_users WHERE lower(email)=$1 AND tokens IS NOT NULL ORDER BY id LIMIT 1",
+          [email.toLowerCase()],
+        )
+      ).rows[0];
+    },
     decrypt,
     async connect(id, email, tokens) {
       const previous = await this.get(id);

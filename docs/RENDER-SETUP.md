@@ -96,3 +96,7 @@ Số Việt Nam được chuẩn hóa theo mã +84, số quốc tế cần mã +
 Nên sửa qua giao diện để áp dụng chuẩn hóa, kiểm tra trùng và nhật ký; sửa trực tiếp bằng SQL có thể bỏ qua các bước này. Chủ database vẫn có quyền truy cập toàn bộ dữ liệu, vì vậy không chia sẻ DATABASE_URL với người dùng thường.
 
 **Không có SMS OTP hay xác minh SIM chính chủ trong chức năng này.** Một số hợp định dạng vẫn có thể thuộc người khác hoặc không còn hoạt động. Nhãn hiển thị là “Đã kiểm tra thủ công”, không phải đã nhận SMS. Muốn chứng minh nhận được số cần tích hợp OTP riêng và kiểm tra chi phí nhà cung cấp. Cut Label vẫn dùng được không đăng nhập và không yêu cầu số điện thoại; cổng kiểm tra áp dụng cho Get Label ở Web Service.
+
+## Trang đăng nhập/đăng ký riêng
+
+Bản web có các form email/mật khẩu và vẫn có tùy chọn Google cho tài khoản cũ. Xem EMAIL-PASSWORD-AUTH.md. Để gửi xác nhận và khôi phục qua Gmail quản trị, đăng nhập Google bằng tài khoản trong ADMIN_EMAILS trước, rồi thêm AUTH_MAIL_PROVIDER=gmail và AUTH_MAIL_SENDER_EMAIL bằng email quản trị đã kết nối, deploy lại. Không cần đổi SESSION_SECRET hoặc TOKEN_ENCRYPTION_KEY. Chưa cấu hình gửi email thì các chức năng cần xác nhận email chưa sử dụng được; bản Static Site không có chức năng tài khoản này.

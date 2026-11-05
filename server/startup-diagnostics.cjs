@@ -1,5 +1,7 @@
 // Fixed messages only: never log upstream errors, URLs or environment values.
 const reasons = {
+  CONFIG_AUTH_MAIL_SENDER:
+    "AUTH_MAIL_SENDER_EMAIL must be a valid administrator email listed in ADMIN_EMAILS.",
   CONFIG_PUBLIC_BASE_URL:
     "PUBLIC_BASE_URL/Render hostname is missing or invalid. Use an HTTPS origin only.",
   CONFIG_GOOGLE_CLIENT_ID: "GOOGLE_CLIENT_ID is missing.",

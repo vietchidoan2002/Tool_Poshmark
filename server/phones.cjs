@@ -133,7 +133,11 @@ async function mountPhones(app, pool, users, config) {
     throw Error("ADMIN_EMAILS is required when phone review is required");
   const isAdmin = async (id) => {
     const user = id ? await users.get(id) : null;
-    return !!user && admins.has(user.email.toLowerCase());
+    return (
+      !!user &&
+      admins.has(user.email.toLowerCase()) &&
+      (!users.isVerified || (await users.isVerified(id)))
+    );
   };
   const wrap = (fn) => (req, res, next) =>
     Promise.resolve(fn(req, res)).catch((error) =>

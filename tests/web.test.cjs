@@ -4,6 +4,14 @@ const { newDb, DataType } = require("pg-mem");
 const session = require("express-session");
 const { EventEmitter } = require("node:events");
 const { createWebApp } = require("../server/web.cjs");
+async function waitForMail(messages, count) {
+  const deadline = Date.now() + 2000;
+  while (messages.length < count) {
+    if (Date.now() > deadline)
+      throw Error("Expected test email was not delivered");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 const secret = "test-only-not-a-real-key-12345678901234567890";
 function database() {
   const db = newDb();
@@ -92,7 +100,11 @@ async function fixture(t, runOrders, options = {}) {
       adminEmails: options.adminEmails,
       requirePhoneReview: options.requirePhoneReview,
     },
-    { oauthFactory: provider, runOrders },
+    {
+      oauthFactory: provider,
+      runOrders,
+      ...(options.sendEmail ? { sendEmail: options.sendEmail } : {}),
+    },
   );
   const server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
@@ -131,6 +143,7 @@ async function fixture(t, runOrders, options = {}) {
       "/oauth2callback?state=" + state + "&code=" + id,
     );
     assert.equal(callback.status, 302);
+    return callback;
   }
   return { browser, login, store, pool, app };
 }
@@ -460,4 +473,393 @@ test("phone review gate is enforced on server and cannot be self-approved", asyn
     200,
   );
   assert.equal(runs, 1);
+});
+
+test("password registration, verification, remember session and Google linking stay separated", async (t) => {
+  const messages = [];
+  const { browser, login, pool } = await fixture(t, undefined, {
+    adminEmails: "new@example.test",
+    sendEmail: async (message) => messages.push(message),
+  });
+  const user = browser();
+  const data = {
+    name: "Người thử",
+    email: "NEW@example.test",
+    password: "test-password-123",
+    confirmPassword: "test-password-123",
+    acceptTerms: true,
+  };
+  assert.equal(
+    (
+      await user("/api/auth/register", {
+        method: "POST",
+        headers: { origin: "https://bad.test" },
+        body: data,
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await user("/api/auth/register", {
+        method: "POST",
+        body: { ...data, acceptTerms: false },
+      })
+    ).status,
+    400,
+  );
+  const registered = await user("/api/auth/register", {
+    method: "POST",
+    body: data,
+  });
+  assert.equal(registered.status, 201);
+  assert.equal(
+    registered.headers.get("set-cookie").includes("Expires="),
+    false,
+  );
+  const identity = await (await user("/api/session")).json();
+  assert.ok(identity.userId.startsWith("pw:"));
+  assert.equal(identity.authenticated, true);
+  const record = (
+    await pool.query("SELECT * FROM pm_password_accounts WHERE user_id=$1", [
+      identity.userId,
+    ])
+  ).rows[0];
+  assert.ok(record.password_hash.startsWith("scrypt-v1$"));
+  assert.ok(!record.password_hash.includes(data.password));
+  assert.equal(record.email_verified, false);
+  assert.equal((await user("/api/admin/phones")).status, 403);
+  assert.equal((await user("/api/auth/start")).status, 403);
+  assert.equal(messages.length, 1);
+  const token = new URL(messages[0].text.split("\n")[1]).hash.split(
+    "token=",
+  )[1];
+  const outsider = browser();
+  assert.equal(
+    (
+      await outsider("/api/auth/verify-email", {
+        method: "POST",
+        body: { token },
+      })
+    ).status,
+    401,
+  );
+  assert.equal(
+    (await user("/api/auth/verify-email", { method: "POST", body: { token } }))
+      .status,
+    200,
+  );
+  assert.equal(
+    (await user("/api/auth/verify-email", { method: "POST", body: { token } }))
+      .status,
+    400,
+  );
+  assert.equal((await user("/api/admin/phones")).status, 200);
+  // Linking a different Gmail preserves the website account and its identity.
+  const connected = await login(user, "ConnectedGoogle");
+  assert.equal(connected.headers.get("set-cookie").includes("Expires="), false);
+  assert.equal(
+    (await (await user("/api/session")).json()).userId,
+    identity.userId,
+  );
+  assert.equal(
+    (await (await user("/api/gmail/status")).json()).accounts[0].email,
+    "ConnectedGoogle@example.test",
+  );
+  await user("/api/logout", { method: "POST" });
+  const wrong = await user("/api/auth/login", {
+    method: "POST",
+    body: { email: data.email, password: "wrong" },
+  });
+  assert.equal(wrong.status, 401);
+  const signed = await user("/api/auth/login", {
+    method: "POST",
+    body: { email: data.email, password: data.password, remember: true },
+  });
+  assert.equal(signed.status, 200);
+  assert.ok(signed.headers.get("set-cookie").includes("Expires="));
+  assert.equal(
+    (await user("/api/auth/register", { method: "POST", body: data })).status,
+    409,
+  );
+});
+
+test("forgot password is generic; reset is single-use, rejects expired tokens and invalidates old sessions", async (t) => {
+  const messages = [];
+  const { browser, pool } = await fixture(t, undefined, {
+    sendEmail: async (message) => messages.push(message),
+  });
+  const a = browser(),
+    b = browser();
+  const details = {
+    name: "Reset Test",
+    email: "reset@example.test",
+    password: "old-password-123",
+    confirmPassword: "old-password-123",
+    acceptTerms: true,
+  };
+  await a("/api/auth/register", { method: "POST", body: details });
+  await b("/api/auth/login", {
+    method: "POST",
+    body: { email: details.email, password: details.password, remember: true },
+  });
+  const unknown = await a("/api/auth/forgot-password", {
+    method: "POST",
+    body: { email: "missing@example.test" },
+  });
+  const known = await a("/api/auth/forgot-password", {
+    method: "POST",
+    body: { email: details.email },
+  });
+  assert.deepEqual(await unknown.json(), await known.json());
+  await waitForMail(messages, 2);
+  let token = new URL(messages.at(-1).text.split("\n")[1]).hash.split(
+    "token=",
+  )[1];
+  const rows = (await pool.query("SELECT * FROM pm_account_actions")).rows;
+  assert.ok(!JSON.stringify(rows).includes(token));
+  await pool.query("UPDATE pm_account_actions SET expires_at=$1", [
+    new Date(0),
+  ]);
+  assert.equal(
+    (
+      await a("/api/auth/reset-password", {
+        method: "POST",
+        body: {
+          token,
+          password: "new-password-123",
+          confirmPassword: "new-password-123",
+        },
+      })
+    ).status,
+    400,
+  );
+  await a("/api/auth/forgot-password", {
+    method: "POST",
+    body: { email: details.email },
+  });
+  await waitForMail(messages, 3);
+  token = new URL(messages.at(-1).text.split("\n")[1]).hash.split("token=")[1];
+  const body = {
+    token,
+    password: "new-password-123",
+    confirmPassword: "new-password-123",
+  };
+  assert.equal(
+    (await a("/api/auth/reset-password", { method: "POST", body })).status,
+    200,
+  );
+  assert.equal(
+    (await a("/api/auth/reset-password", { method: "POST", body })).status,
+    400,
+  );
+  assert.equal((await (await b("/api/session")).json()).authenticated, false);
+  assert.equal(
+    (
+      await b("/api/auth/login", {
+        method: "POST",
+        body: { email: details.email, password: details.password },
+      })
+    ).status,
+    401,
+  );
+  assert.equal(
+    (
+      await b("/api/auth/login", {
+        method: "POST",
+        body: { email: details.email, password: body.password },
+      })
+    ).status,
+    200,
+  );
+  assert.equal((await (await b("/api/account")).json()).emailVerified, true);
+});
+
+test("password recovery reports missing mail setup honestly; passwords must meet length and match", async (t) => {
+  const { browser } = await fixture(t);
+  const user = browser();
+  assert.equal(
+    (
+      await user("/api/auth/forgot-password", {
+        method: "POST",
+        body: { email: "a@example.test" },
+      })
+    ).status,
+    503,
+  );
+  for (const patch of [
+    { password: "short", confirmPassword: "short" },
+    { password: "long-password", confirmPassword: "different" },
+    { email: "bad<address>@example.test" },
+  ]) {
+    assert.equal(
+      (
+        await user("/api/auth/register", {
+          method: "POST",
+          body: {
+            name: "Test",
+            email: "a@example.test",
+            password: "test-password",
+            confirmPassword: "test-password",
+            acceptTerms: true,
+            ...patch,
+          },
+        })
+      ).status,
+      400,
+    );
+  }
+});
+
+test("existing Google users can set an email password by verified recovery without losing their Google account", async (t) => {
+  const messages = [];
+  const { browser, login } = await fixture(t, undefined, {
+    sendEmail: async (message) => messages.push(message),
+  });
+  const user = browser();
+  await login(user, "LegacyOwner");
+  await user("/api/auth/forgot-password", {
+    method: "POST",
+    body: { email: "legacyowner@example.test" },
+  });
+  await waitForMail(messages, 1);
+  const token = new URL(messages.at(-1).text.split("\n")[1]).hash.split(
+    "token=",
+  )[1];
+  const body = {
+    token,
+    password: "new-password-123",
+    confirmPassword: "new-password-123",
+  };
+  assert.equal(
+    (await user("/api/auth/reset-password", { method: "POST", body })).status,
+    200,
+  );
+  assert.equal(
+    (
+      await user("/api/auth/login", {
+        method: "POST",
+        body: { email: "LEGACYOWNER@example.test", password: body.password },
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await (await user("/api/session")).json()).userId,
+    "LegacyOwner",
+  );
+  assert.equal(
+    (await (await user("/api/gmail/status")).json()).accounts.length,
+    1,
+  );
+});
+
+test(
+  "forgot password does not wait on provider latency or expose known accounts by delivery outcome",
+  { timeout: 3000 },
+  async (t) => {
+    let hold = false,
+      release;
+    const delivery = new Promise((resolve) => (release = resolve));
+    t.after(() => release());
+    const { browser } = await fixture(t, undefined, {
+      sendEmail: async () => {
+        if (hold) await delivery;
+      },
+    });
+    const client = browser();
+    await client("/api/auth/register", {
+      method: "POST",
+      body: {
+        name: "Test",
+        email: "timing@example.test",
+        password: "test-password",
+        confirmPassword: "test-password",
+        acceptTerms: true,
+      },
+    });
+    hold = true;
+    const response = await client("/api/auth/forgot-password", {
+      method: "POST",
+      body: { email: "timing@example.test" },
+    });
+    assert.equal(response.status, 200);
+    release();
+  },
+);
+
+test("repeated wrong passwords lock briefly and an expired lock permits correct credentials", async (t) => {
+  const { browser, pool } = await fixture(t);
+  const user = browser();
+  const email = "lock@example.test",
+    password = "test-password-123";
+  await user("/api/auth/register", {
+    method: "POST",
+    body: {
+      name: "Lock Test",
+      email,
+      password,
+      confirmPassword: password,
+      acceptTerms: true,
+    },
+  });
+  await user("/api/logout", { method: "POST" });
+  for (let i = 0; i < 10; i++)
+    assert.equal(
+      (
+        await user("/api/auth/login", {
+          method: "POST",
+          body: { email, password: "wrong" },
+        })
+      ).status,
+      401,
+    );
+  assert.equal(
+    (
+      await user("/api/auth/login", {
+        method: "POST",
+        body: { email, password },
+      })
+    ).status,
+    401,
+  );
+  await pool.query("UPDATE pm_password_accounts SET locked_until=$1", [
+    new Date(0),
+  ]);
+  assert.equal(
+    (
+      await user("/api/auth/login", {
+        method: "POST",
+        body: { email, password },
+      })
+    ).status,
+    200,
+  );
+});
+
+test("email budget stops further verification deliveries rather than sending without limits", async (t) => {
+  let delivered = 0;
+  const { browser, pool } = await fixture(t, undefined, {
+    sendEmail: async () => {
+      delivered++;
+    },
+  });
+  const user = browser();
+  await user("/api/auth/register", {
+    method: "POST",
+    body: {
+      name: "Mail Test",
+      email: "budget@example.test",
+      password: "test-password",
+      confirmPassword: "test-password",
+      acceptTerms: true,
+    },
+  });
+  assert.equal(delivered, 1);
+  await pool.query("UPDATE pm_mail_budget SET used=50");
+  assert.equal(
+    (await user("/api/auth/resend-verification", { method: "POST" })).status,
+    500,
+  );
+  assert.equal(delivered, 1);
 });
