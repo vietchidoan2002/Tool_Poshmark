@@ -99,11 +99,14 @@ async function fixture(t, runOrders, options = {}) {
       encryptionKey: secret,
       adminEmails: options.adminEmails,
       requirePhoneReview: options.requirePhoneReview,
+      mailProvider: options.mailProvider,
+      mailSenderEmail: options.mailSenderEmail,
     },
     {
       oauthFactory: provider,
       runOrders,
       ...(options.sendEmail ? { sendEmail: options.sendEmail } : {}),
+      ...(options.gmailFactory ? { gmailFactory: options.gmailFactory } : {}),
     },
   );
   const server = app.listen(0, "127.0.0.1");
@@ -897,7 +900,7 @@ test("email budget stops further verification deliveries rather than sending wit
   await pool.query("UPDATE pm_mail_budget SET used=50");
   assert.equal(
     (await user("/api/auth/resend-verification", { method: "POST" })).status,
-    500,
+    429,
   );
   assert.equal(delivered, 1);
 });
@@ -990,4 +993,86 @@ test("mail delivery failure never reports activation or logs a new account in", 
   );
   assert.equal((await user("/api/config")).status, 403);
   assert.equal((await user("/api/logout", { method: "POST" })).status, 200);
+});
+
+test("admin Gmail bootstrap unlocks mail delivery without bypassing the password account email check", async (t) => {
+  const diagnostics = [];
+  t.mock.method(console, "error", (message) => diagnostics.push(message));
+  const messages = [];
+  const { browser, login, pool } = await fixture(t, undefined, {
+    adminEmails: "Admin@example.test",
+    mailProvider: "gmail",
+    mailSenderEmail: "Admin@example.test",
+    gmailFactory: () => ({
+      users: { messages: { send: async (request) => messages.push(request) } },
+    }),
+  });
+  const user = browser();
+  const details = {
+    name: "Admin signup",
+    email: "Admin@example.test",
+    phone: "0901234567",
+    password: "test-password",
+    confirmPassword: "test-password",
+    acceptTerms: true,
+  };
+  const signup = await user("/api/auth/register", {
+    method: "POST",
+    body: details,
+  });
+  assert.equal(signup.status, 201);
+  assert.equal((await signup.json()).emailSent, false);
+  assert.equal(messages.length, 0);
+  await user("/api/auth/login", { method: "POST", body: details });
+  const passwordId = (await (await user("/api/session")).json()).userId;
+  const failed = await user("/api/auth/resend-verification", {
+    method: "POST",
+  });
+  assert.equal(failed.status, 503);
+  const error = await failed.json();
+  assert.equal(error.code, "AUTH_MAIL_SENDER_NOT_CONNECTED");
+  assert.match(error.error, /Tiếp tục với Google/);
+  assert.equal(
+    (await pool.query("SELECT * FROM pm_mail_budget")).rows.length,
+    0,
+    "missing sender must not consume the daily mail allowance",
+  );
+  assert.ok(
+    diagnostics.every((line) =>
+      line.startsWith("[AUTH_MAIL_SENDER_NOT_CONNECTED]"),
+    ),
+  );
+  assert.equal((await user("/api/admin/phones")).status, 403);
+  await user("/api/logout", { method: "POST" });
+  await login(user, "Admin");
+  assert.notEqual(
+    (await (await user("/api/session")).json()).userId,
+    passwordId,
+    "Google login must not merge an unverified password account",
+  );
+  await user("/api/logout", { method: "POST" });
+  await user("/api/auth/login", { method: "POST", body: details });
+  assert.equal(
+    (await (await user("/api/session")).json()).emailVerified,
+    false,
+  );
+  assert.equal(
+    (await user("/api/auth/resend-verification", { method: "POST" })).status,
+    200,
+  );
+  assert.equal(messages.length, 1);
+  const raw = Buffer.from(messages[0].requestBody.raw, "base64url").toString();
+  const text = Buffer.from(
+    raw.split("\r\n\r\n")[1].replace(/\r\n/g, ""),
+    "base64",
+  ).toString();
+  const token = new URL(text.split("\n")[1]).hash.split("token=")[1];
+  assert.equal(
+    (await user("/api/auth/verify-email", { method: "POST", body: { token } }))
+      .status,
+    200,
+  );
+  const session = await (await user("/api/session")).json();
+  assert.equal(session.emailVerified, true);
+  assert.equal(session.userId, passwordId);
 });

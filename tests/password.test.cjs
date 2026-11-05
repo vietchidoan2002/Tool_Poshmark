@@ -71,3 +71,52 @@ test("Gmail mailer requires an explicitly configured admin sender and uses the c
   assert.match(raw, /To: recipient@example.test/);
   assert.equal(outgoing.userId, "me");
 });
+
+test("Gmail sender preflight rejects missing, unverified, mismatched and unreadable connections", async () => {
+  for (const [kind, expected] of [
+    ["missing", "SENDER_NOT_CONNECTED"],
+    ["unverified", "SENDER_NOT_CONNECTED"],
+    ["mismatch", "SENDER_MISMATCH"],
+    ["unreadable", "TOKEN_UNREADABLE"],
+  ]) {
+    const send = mailSender(
+      {
+        mailProvider: "gmail",
+        mailSenderEmail: "admin@example.test",
+        adminEmails: "admin@example.test",
+      },
+      {
+        userStore: {
+          findByEmail: async () =>
+            kind === "missing"
+              ? undefined
+              : {
+                  id: "admin",
+                  email: "admin@example.test",
+                  tokens: "encrypted",
+                },
+          isVerified: async () => kind !== "unverified",
+          decrypt: () => {
+            if (kind === "unreadable") throw Error("fake-private-token");
+            return {
+              pm_connected_email:
+                kind === "mismatch"
+                  ? "other@example.test"
+                  : "admin@example.test",
+            };
+          },
+        },
+        oauthFactory: () => {
+          throw Error("Preflight must fail before contacting Google");
+        },
+      },
+    );
+    await assert.rejects(
+      send.prepare(),
+      (error) =>
+        error.code === "AUTH_MAIL_" + expected &&
+        error.status === 503 &&
+        !error.message.includes("fake-private-token"),
+    );
+  }
+});

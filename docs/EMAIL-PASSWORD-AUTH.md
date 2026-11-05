@@ -28,6 +28,35 @@ Không bắt buộc mua dịch vụ SMS hoặc dùng SMTP. Phương án mặc đ
 4. Deploy lại. Chỉ sau cấu hình này, ứng dụng mới dùng Gmail đó để gửi email xác nhận/khôi phục. Không tự dùng token của người dùng khác làm người gửi.
 5. Tạo tài khoản thử bằng email khác, kiểm tra nhận mail (kể cả Spam), xác nhận đúng phiên, reset một lần rồi thử đăng nhập lại. Không chia sẻ link reset hoặc secret.
 
+### Đã đăng ký nhưng không nhận được email
+
+Nếu chủ website đã đăng ký email/mật khẩu trước khi kết nối Gmail gửi thư:
+
+1. Ở trang **Xác nhận email của bạn**, bấm **Đăng xuất**.
+2. Trên form đăng nhập, chọn **Tiếp tục với Google**, dùng đúng Gmail khai báo trong `AUTH_MAIL_SENDER_EMAIL` và `ADMIN_EMAILS`, cấp đủ quyền Gmail/Sheets. Chỉ đăng nhập email/mật khẩu không tạo kết nối Gmail API.
+3. Sau khi Google đưa về công cụ, bấm **Đăng xuất** rồi đăng nhập lại bằng email/mật khẩu của tài khoản website đang chờ kích hoạt.
+4. Bấm **Gửi lại email xác nhận**, mở thư và xác nhận. Không cần tạo lại tài khoản hoặc sửa cờ `email_verified` trong database.
+
+Đăng nhập Google không tự gộp hay xác nhận tài khoản mật khẩu trùng email. Liên kết xác nhận được gửi cho tài khoản mật khẩu; chỉ tài khoản đó được dùng liên kết.
+
+Nếu Google báo **400: redirect_uri_mismatch**, mở **Google Auth Platform → Clients**, chọn Web client có ID khớp `GOOGLE_CLIENT_ID` của Render. Thêm `https://poshmark-label-web.onrender.com/oauth2callback` vào **Authorized redirect URIs**, lưu, chờ vài phút và bắt đầu lại từ nút Google trên website. Nếu dùng tên miền khác, thay bằng tên miền thật. URI phải khớp cả HTTPS, tên miền, đường dẫn và dấu gạch cuối; JavaScript origins không thay thế redirect URIs. Nếu đã đặt `PUBLIC_BASE_URL` trên Render, nó phải là origin của web, ví dụ `https://poshmark-label-web.onrender.com` (không thêm `/oauth2callback`). Không cần tạo lại database hoặc thay khóa phiên/mã hóa.
+
+Nếu Google chưa cho cấp quyền, thêm Gmail gửi thư vào **Google Auth Platform → Audience → Test users** khi dự án ở Testing. Bật **Gmail API** trong **APIs & Services → Library** của đúng dự án chứa OAuth client.
+
+Ứng dụng trả mã lỗi cố định khi gửi lại thất bại, đồng thời ghi cùng mã vào Render Logs; không ghi token, URL yêu cầu Google hoặc nội dung thư:
+
+| Mã trong Render Logs | Cách xử lý |
+| --- | --- |
+| `AUTH_MAIL_SENDER_NOT_CONNECTED` | Kết nối Gmail quản trị theo bốn bước trên. Lỗi này không trừ hạn mức gửi mail/ngày. |
+| `AUTH_MAIL_SENDER_MISMATCH` | Kết nối lại đúng Gmail gửi thư đã cấu hình. |
+| `AUTH_MAIL_TOKEN_UNREADABLE` | Kiểm tra khóa mã hóa có bị thay đổi không, rồi kết nối lại Gmail; không đăng khóa lên chat. |
+| `AUTH_MAIL_RECONNECT` | Token Google đã hết hạn/bị thu hồi; cấp quyền lại Gmail quản trị. |
+| `AUTH_MAIL_API_DISABLED` | Bật Gmail API trong đúng Google Cloud project. |
+| `AUTH_MAIL_PERMISSION` | Kết nối lại và cấp quyền Gmail. |
+| `AUTH_MAIL_GOOGLE_CONFIG` | Kiểm tra OAuth client và cấu hình Google trên Render. |
+| `AUTH_MAIL_RATE_LIMIT` / `AUTH_MAIL_DAILY_LIMIT` | Chờ hạn mức nhà cung cấp/website được cấp lại, không bấm gửi liên tục. |
+| `AUTH_MAIL_TIMEOUT` / `AUTH_MAIL_DELIVERY_FAILED` | Thử lại sau; gửi mã lỗi cho quản trị viên nếu vẫn lỗi. |
+
 Nếu Gmail quản trị chưa kết nối, đã ngắt kết nối, sai tài khoản gửi hoặc vượt quota, email có thể không đến; tài khoản mới vẫn ở trạng thái chưa xác nhận. Không đánh dấu email đã gửi/thành công chỉ dựa trên việc bấm nút. Email xuất hiện trong Sent của người gửi theo hành vi Gmail bình thường. Ứng dụng không gửi PDF hoặc nội dung đơn hàng trong email xác nhận.
 
 Nếu không có cấu hình gửi email, giao diện thông báo rõ. Quên mật khẩu trả lỗi chưa cấu hình, không giả vờ đã gửi. Tài khoản đăng ký mới sẽ cần chờ quản trị viên bật gửi mail rồi chọn **Gửi lại email xác nhận**.

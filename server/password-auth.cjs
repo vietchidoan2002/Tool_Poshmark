@@ -3,6 +3,7 @@ const { promisify } = require("node:util");
 const derive = promisify(crypto.scrypt);
 const { rateLimit } = require("express-rate-limit");
 const { normalizePhone } = require("./phones.cjs");
+const { mailError, mailDiagnostic } = require("./mail-diagnostics.cjs");
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const emailAddress = (value) => {
   const email = String(value || "")
@@ -281,16 +282,24 @@ function mailSender(config, deps) {
       throw require("./startup-diagnostics.cjs").configurationError(
         "CONFIG_AUTH_MAIL_SENDER",
       );
-    return async (message) => {
+    const prepare = async () => {
       const user = await deps.userStore.findByEmail(sender);
       if (!user?.tokens || !(await deps.userStore.isVerified(user.id)))
-        throw Error("Gmail sender not connected");
-      const { pm_connected_email, ...credentials } = deps.userStore.decrypt(
-        user.tokens,
-        user.id,
-      );
-      if ((pm_connected_email || user.email).toLowerCase() !== sender)
-        throw Error("Connected Gmail sender does not match");
+        throw mailError("SENDER_NOT_CONNECTED");
+      let stored;
+      try {
+        stored = deps.userStore.decrypt(user.tokens, user.id);
+        if (!stored || typeof stored !== "object") throw Error("Invalid token");
+      } catch {
+        throw mailError("TOKEN_UNREADABLE");
+      }
+      const { pm_connected_email, ...credentials } = stored;
+      if (String(pm_connected_email || user.email).toLowerCase() !== sender)
+        throw mailError("SENDER_MISMATCH");
+      return { user, credentials };
+    };
+    const send = async (message, prepared) => {
+      const { user, credentials } = prepared || (await prepare());
       const auth = deps.oauthFactory();
       auth.setCredentials(credentials);
       const writes = [];
@@ -329,6 +338,8 @@ function mailSender(config, deps) {
       );
       await Promise.all(writes);
     };
+    send.prepare = prepare;
+    return send;
   }
   if (!config.resendKey || !config.emailFrom) return null;
   return async (message) => {
@@ -359,6 +370,15 @@ async function mountPasswordAuth(app, pool, config, deps) {
   const deliver = sendEmail;
   const sendBounded = deliver
     ? async (message) => {
+        // Check the configured Gmail before reserving a daily send attempt.
+        let prepared;
+        try {
+          prepared = await deliver.prepare?.();
+        } catch (error) {
+          const diagnostic = mailDiagnostic(error);
+          console.error(`[${diagnostic.code}] ${diagnostic.message}`);
+          throw diagnostic;
+        }
         const day = new Date().toISOString().slice(0, 10);
         await pool.query(
           "INSERT INTO pm_mail_budget(day_key,used) VALUES($1,0) ON CONFLICT(day_key) DO NOTHING",
@@ -368,14 +388,27 @@ async function mountPasswordAuth(app, pool, config, deps) {
           "UPDATE pm_mail_budget SET used=used+1 WHERE day_key=$1 AND used<50 RETURNING used",
           [day],
         );
-        if (!result.rows.length) throw Error("Daily email limit reached");
-        await deliver(message);
+        try {
+          if (!result.rows.length) throw mailError("DAILY_LIMIT");
+          await deliver(message, prepared);
+        } catch (error) {
+          const diagnostic = mailDiagnostic(error);
+          console.error(`[${diagnostic.code}] ${diagnostic.message}`);
+          throw diagnostic;
+        }
       }
     : null;
   const wrap = (fn) => (req, res, next) =>
     Promise.resolve(fn(req, res)).catch((error) =>
       error.status
-        ? res.status(error.status).json({ error: error.message })
+        ? res
+            .status(error.status)
+            .json({
+              error: error.message,
+              ...(String(error.code || "").startsWith("AUTH_MAIL_")
+                ? { code: error.code }
+                : {}),
+            })
         : next(error),
     );
   const origin = (req, res, next) =>
