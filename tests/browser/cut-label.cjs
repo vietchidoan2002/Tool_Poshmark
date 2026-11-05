@@ -80,6 +80,16 @@ async function open(t, options = {}) {
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
+      if (url.pathname === "/api/session" && options.webMode)
+        return route.fulfill({
+          json: {
+            webMode: true,
+            authenticated: !!options.signedIn,
+            userId: options.signedIn ? "test-user" : null,
+          },
+        });
+      if (url.pathname === "/api/version" && options.newVersion)
+        return route.fulfill({ json: { version: "test-new-version" } });
       if (url.pathname.startsWith("/api/"))
         return route.fulfill({
           json: url.pathname.endsWith("/config")
@@ -496,4 +506,33 @@ test("refreshing Gmail does not overwrite an unsaved Sheet ID", async (t) => {
     await page.getByLabel("Spreadsheet ID", { exact: true }).inputValue(),
     "unsaved-sheet-id",
   );
+});
+
+test("web guests can use Cut Label without exposing Gmail configuration", async (t) => {
+  const page = await open(t, { webMode: true });
+  await page.getByRole("button", { name: /Get Label/ }).click();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Đăng nhập bằng Google" })
+      .isVisible(),
+    true,
+  );
+  assert.equal(
+    await page.getByLabel("Spreadsheet ID", { exact: true }).count(),
+    0,
+  );
+  await page.getByRole("button", { name: /Cut Label/ }).click();
+  await upload(page, pdf(await fixture()), 1);
+  assert.equal(await page.locator(".page input").inputValue(), ID);
+});
+
+test("version notice never reloads a page containing unexported labels", async (t) => {
+  const page = await open(t, { newVersion: true });
+  await upload(page, pdf(await fixture()), 1);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.getByRole("button", { name: "Tải phiên bản mới" }).waitFor();
+  assert.equal(await page.locator(".page").count(), 1);
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "Tải phiên bản mới" }).click();
+  assert.equal(await page.locator(".page").count(), 1);
 });

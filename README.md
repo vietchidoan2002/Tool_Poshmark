@@ -58,3 +58,9 @@ The browser suite covers native/scanned labels, custom/default/missing/duplicate
 An optional private reference PDF can be tested using `LABEL_SAMPLE_PDF`, `LABEL_SAMPLE_ORDER_ID` and `LABEL_SAMPLE_TRACKING`; do not commit real shipping labels or credentials. The suite skips this optional check when no sample path is provided. Validation covers these specified cases in Chromium; it does not establish every possible PDF, OCR result, browser or printer behavior.
 
 The interface uses local system fonts (no font-CDN requests), highlights cautions in amber and errors in red, and provides a keyboard-accessible upload field. OCR progress identifies the file and page. An OCR render is reused to create the preview instead of rendering the page twice. Mobile layout, direct tracking display and one-recognition-per-page behavior are covered by regression tests. OCR accuracy remains dependent on the source image; always check the original label, especially visually similar hexadecimal characters.
+
+## Render preview and multi-user web mode
+
+For the no-paid-services preview, follow [RENDER-PREVIEW.md](docs/RENDER-PREVIEW.md). The default render.yaml creates a static Cut Label preview only, built with VITE_PREVIEW_ONLY=true. It has no Gmail APIs, database or login.
+
+The separate `npm run start:web` entrypoint implements Google login, user-scoped encrypted credentials/Sheet IDs, origin checks and import locks with PostgreSQL. This is not the local `npm start` server. Paid-resource configuration is in render.web.yaml and is not deployed by the default preview blueprint. See [RENDER-SETUP.md](docs/RENDER-SETUP.md). Live Google/Render/PostgreSQL verification is still required before a full multi-user launch; automated backend tests use fake Google, in-memory SQL and session storage. Never expose the old local-file API server publicly.

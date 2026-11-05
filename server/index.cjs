@@ -42,6 +42,9 @@ function loadOAuth() {
   return new google.auth.OAuth2(key.client_id, key.client_secret, 'http://localhost:3210/oauth2callback');
 }
 
+app.get('/api/session', (req,res) => res.json({webMode:false,authenticated:true}));
+app.get('/api/version', (req,res) => res.set('Cache-Control','no-store').json({version:'local'}));
+
 app.get('/api/config', (req, res) => {
   const config = readConfig();
   res.json({ sheetId: config.sheetId || '' });

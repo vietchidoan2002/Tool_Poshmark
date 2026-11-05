@@ -10,18 +10,26 @@
     "build": "vite build",
     "start": "node server/index.cjs",
     "test": "node --test tests/*.test.*",
-    "test:browser": "node --test tests/browser/cut-label.cjs"
+    "test:browser": "node --test tests/browser/cut-label.cjs",
+    "start:web": "node server/web.cjs",
+    "build:preview": "node scripts/build-preview.mjs",
+    "test:preview": "node --test tests/browser/static-preview.cjs"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "1.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "cheerio": "^1.2.0",
     "concurrently": "^9.1.0",
+    "connect-pg-simple": "10.0.0",
     "express": "^4.21.2",
+    "express-rate-limit": "8.7.3",
+    "express-session": "1.19.0",
     "fflate": "0.8.2",
     "googleapis": "^176.0.0",
+    "helmet": "8.3.0",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^4.10.38",
+    "pg": "8.23.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tesseract.js": "^6.0.1",
@@ -29,6 +37,10 @@
     "vite": "^6.0.7"
   },
   "devDependencies": {
+    "pg-mem": "3.0.14",
     "playwright-core": "1.64.1"
+  },
+  "engines": {
+    "node": "24.x"
   }
 }

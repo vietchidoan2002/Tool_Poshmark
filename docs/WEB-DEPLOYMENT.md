@@ -1,10 +1,10 @@
 # Central web deployment: agreed direction
 
-Status: design and frontend preparation only. The current app is still a local single-user application, not a completed multi-user web service. Do not expose the existing Gmail APIs publicly: they read shared local files without user authentication.
+Status: web-mode implementation available for preview deployment, not yet verified with live Google login or Render/PostgreSQL. Run `npm run start:web` for authenticated, user-scoped APIs backed by PostgreSQL. The original `npm start`/`npm run dev` server is still a LOCAL single-user tool and must never be exposed publicly. See RENDER-SETUP.md for deployment steps and costs.
 
 The requested model is one centrally updated website with each person connecting their own Gmail and Sheets. The API is now same-origin so the frontend does not call a visitor's local machine. Vite proxies API requests during local development. Production build and API must be served together behind HTTPS.
 
-## Required migration before launch
+## Implemented design and release requirements
 
 - Sign in with Google and keep a secure server-side session for each person. Bind Google OAuth state to the browser session, register the chosen HTTPS callback URL, and rotate sessions after login.
 - Use Google's stable user identifier to scope all token, Sheet configuration, account-status, deletion and Get Label operations. Client parameters must never select another person's token file.

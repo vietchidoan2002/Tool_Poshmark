@@ -26,6 +26,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
 let sharedPdfWorker;
 const getPdfWorker = () => (sharedPdfWorker ||= new pdfjsLib.PDFWorker());
+const PREVIEW_ONLY = import.meta.env.VITE_PREVIEW_ONLY === "true";
 const API = ""; // Same-origin API; Vite proxies local development requests.
 
 async function renderPage(page, scale = 3) {
@@ -154,7 +155,12 @@ function ExportReview({ review, onCancel, onConfirm }) {
 }
 
 function App() {
-  const [page, setPage] = useState("get");
+  const [page, setPage] = useState(PREVIEW_ONLY ? "cut" : "get");
+  const [webMode, setWebMode] = useState(PREVIEW_ONLY);
+  const [authenticated, setAuthenticated] = useState(false);
+  const authUser = useRef(null);
+  const refreshGeneration = useRef(0);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
   const [sheetId, setSheetId] = useState("");
   const sheetDraft = useRef(null);
   const [accountName, setAccountName] = useState("");
@@ -192,11 +198,33 @@ function App() {
     [],
   );
   async function refresh() {
+    if (PREVIEW_ONLY) return;
+    const generation = ++refreshGeneration.current;
     try {
+      const sessionResponse = await fetch(API + "/api/session");
+      if (!sessionResponse.ok) throw new Error("Session unavailable");
+      const session = await sessionResponse.json();
+      if (generation !== refreshGeneration.current) return;
+      setWebMode(!!session.webMode);
+      setAuthenticated(!!session.authenticated);
+      if (session.webMode && authUser.current !== session.userId) {
+        authUser.current = session.userId || null;
+        sheetDraft.current = null;
+        setSheetId("");
+        setSheetName("");
+        setAccountName("");
+        setGetOutput("");
+      }
+      if (session.webMode && !session.authenticated) {
+        setGmail({ credentialsPresent: true, accounts: [] });
+        setTokenFile("");
+        return;
+      }
       const [c, g] = await Promise.all([
         fetch(API + "/api/config").then((r) => r.json()),
         fetch(API + "/api/gmail/status").then((r) => r.json()),
       ]);
+      if (generation !== refreshGeneration.current) return;
       if (sheetDraft.current === null)
         setSheetId(
           c.sheetId === "PASTE_GOOGLE_SHEET_ID_HERE" ? "" : c.sheetId || "",
@@ -241,12 +269,67 @@ function App() {
 
   function changeSheetName(value) {
     setSheetName(value);
-    localStorage.setItem("pm_default_sheet_name", value);
+    if (!webMode) localStorage.setItem("pm_default_sheet_name", value);
   }
 
   useEffect(() => {
     refresh();
+    const checkVersion = async () => {
+      if (PREVIEW_ONLY) return;
+      try {
+        const response = await fetch("/api/version", { cache: "no-store" });
+        const data = await response.json();
+        if (
+          typeof data.version === "string" &&
+          data.version !== "local" &&
+          data.version !== __APP_VERSION__
+        )
+          setUpdateAvailable(true);
+      } catch {
+        /* Keep the current session usable during a deployment. */
+      }
+    };
+    const onFocus = () => {
+      refresh();
+      checkVersion();
+    };
+    const timer = setInterval(checkVersion, 60000);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
   }, []);
+  function connectGoogle() {
+    if (webMode) {
+      if (
+        jobs.length &&
+        !window.confirm(
+          "Đăng nhập Google sẽ tải lại trang và xóa danh sách PDF đang mở. Tiếp tục?",
+        )
+      )
+        return;
+      window.location.assign("/api/auth/start");
+    } else window.open("/api/auth/start", "_blank", "noopener,noreferrer");
+  }
+  async function logout() {
+    const response = await fetch("/api/logout", { method: "POST" });
+    if (response.ok) {
+      sheetDraft.current = null;
+      await refresh();
+    } else setConfigMsg("Không đăng xuất được. Vui lòng thử lại.");
+  }
+  function reloadVersion() {
+    if (cutBusy || getBusy) return;
+    if (
+      jobs.length &&
+      !window.confirm(
+        "Tải phiên bản mới sẽ xóa danh sách PDF đang mở. Hãy xuất file trước. Tiếp tục?",
+      )
+    )
+      return;
+    window.location.reload();
+  }
   async function saveConfig() {
     setConfigMsg("Đang lưu…");
     try {
@@ -544,6 +627,31 @@ function App() {
           <p>Đơn hàng gọn gàng. Label sẵn sàng.</p>
         </div>
       </header>
+      {webMode && authenticated && (
+        <div className="inlineActions">
+          <button className="secondary" onClick={logout} disabled={getBusy}>
+            Đăng xuất
+          </button>
+        </div>
+      )}
+      {updateAvailable && (
+        <aside className="notice">
+          <strong>Có phiên bản mới</strong>
+          <p>Hoàn tất và xuất các label đang mở trước khi cập nhật.</p>
+          <button onClick={reloadVersion} disabled={cutBusy || getBusy}>
+            Tải phiên bản mới
+          </button>
+        </aside>
+      )}
+      {PREVIEW_ONLY && (
+        <aside className="notice">
+          <strong>Bản xem thử · chưa kết nối Gmail/Sheets</strong>
+          <p>
+            Cut Label hoạt động trong trình duyệt. PDF không được tải lên máy
+            chủ. Chưa cần đăng nhập hoặc cài phần mềm.
+          </p>
+        </aside>
+      )}
       <nav className="tabs">
         <button
           className={page === "get" ? "active" : ""}
@@ -570,178 +678,194 @@ function App() {
             </div>
             <span className="pill">Gmail → Google Sheets</span>
           </div>
-          <section className="configbox">
-            <h3>Google Sheets</h3>
-            <label className="field">
-              Spreadsheet ID
-              <input
-                value={sheetId}
-                onChange={(e) => {
-                  sheetDraft.current = e.target.value;
-                  setSheetId(e.target.value);
-                }}
-                placeholder=""
-                aria-describedby="sheet-id-help"
-              />
-            </label>
-            <details id="sheet-id-help" className="hint">
-              <summary>Cách lấy Spreadsheet ID</summary>
+          {webMode && !authenticated ? (
+            <section className="configbox">
+              <h3>
+                {PREVIEW_ONLY
+                  ? "Gmail/Sheets sẽ được bổ sung sau"
+                  : "Gmail và Sheets của riêng bạn"}
+              </h3>
               <p>
-                Mở Google Sheets, sao chép phần nằm giữa /d/ và /edit trong địa
-                chỉ, rồi dán vào ô trên.
+                {PREVIEW_ONLY
+                  ? "Bản xem thử chưa bật tài khoản Google. Chọn Cut Label để thử quét và xuất PDF ngay trong trình duyệt."
+                  : "Đăng nhập Google để kết nối tài khoản và lưu Sheet ID riêng. Bạn vẫn có thể dùng Cut Label mà không cần đăng nhập."}
               </p>
-            </details>
-            <div className="inlineActions">
-              <button className="secondary" onClick={saveConfig}>
-                Lưu Sheet ID
-              </button>
-              <span className="muted">{configMsg}</span>
-            </div>
-          </section>
-          <section className="configbox">
-            <div className="linehead">
-              <h3>Kết nối Gmail</h3>
-              <span
-                className={gmail.accounts?.length ? "pill green" : "pill warn"}
-              >
-                {gmail.accounts?.length || 0} token
-              </span>
-            </div>
-            {!gmail.credentialsPresent && (
-              <p className="warning">
-                Thiếu credentials.json. Hãy đặt file OAuth credentials vào thư
-                mục gốc theo README.
-              </p>
-            )}
-            {gmail.accounts?.length ? (
-              gmail.accounts.map((a) => (
-                <div className="account" key={a.file}>
-                  <span className="dot" />
-                  <div className="accountInfo">
-                    <b>{a.email}</b>
-                    <small>
-                      {a.hasRefreshToken
-                        ? "Có refresh token — tự làm mới khi hết hạn"
-                        : "Không có refresh token — có thể cần kết nối lại"}
-                    </small>
-                  </div>
-                  <button
-                    className="danger small"
-                    onClick={() => deleteToken(a.file, a.email)}
+              <div className="inlineActions">
+                {!PREVIEW_ONLY && (
+                  <button onClick={connectGoogle}>Đăng nhập bằng Google</button>
+                )}
+              </div>
+            </section>
+          ) : (
+            <>
+              <section className="configbox">
+                <h3>Google Sheets</h3>
+                <label className="field">
+                  Spreadsheet ID
+                  <input
+                    value={sheetId}
+                    onChange={(e) => {
+                      sheetDraft.current = e.target.value;
+                      setSheetId(e.target.value);
+                    }}
+                    placeholder=""
+                    aria-describedby="sheet-id-help"
+                  />
+                </label>
+                <details id="sheet-id-help" className="hint">
+                  <summary>Cách lấy Spreadsheet ID</summary>
+                  <p>
+                    Mở Google Sheets, sao chép phần nằm giữa /d/ và /edit trong
+                    địa chỉ, rồi dán vào ô trên.
+                  </p>
+                </details>
+                <div className="inlineActions">
+                  <button className="secondary" onClick={saveConfig}>
+                    Lưu Sheet ID
+                  </button>
+                  <span className="muted">{configMsg}</span>
+                </div>
+              </section>
+              <section className="configbox">
+                <div className="linehead">
+                  <h3>Kết nối Gmail</h3>
+                  <span
+                    className={
+                      gmail.accounts?.length ? "pill green" : "pill warn"
+                    }
                   >
-                    Xóa token
+                    {gmail.accounts?.length || 0} token
+                  </span>
+                </div>
+                {!gmail.credentialsPresent && (
+                  <p className="warning">
+                    Thiếu credentials.json. Hãy đặt file OAuth credentials vào
+                    thư mục gốc theo README.
+                  </p>
+                )}
+                {gmail.accounts?.length ? (
+                  gmail.accounts.map((a) => (
+                    <div className="account" key={a.file}>
+                      <span className="dot" />
+                      <div className="accountInfo">
+                        <b>{a.email}</b>
+                        <small>
+                          {a.hasRefreshToken
+                            ? "Có refresh token — tự làm mới khi hết hạn"
+                            : "Không có refresh token — có thể cần kết nối lại"}
+                        </small>
+                      </div>
+                      <button
+                        className="danger small"
+                        onClick={() => deleteToken(a.file, a.email)}
+                      >
+                        Xóa token
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <p className="muted">Chưa có token Gmail được kết nối.</p>
+                )}
+                <div className="inlineActions">
+                  <button onClick={connectGoogle}>
+                    Kết nối / làm mới Gmail
+                  </button>
+                  <button
+                    className="secondary"
+                    onClick={refresh}
+                    title="Đọc lại tài khoản Gmail đã kết nối, không cập nhật phiên bản phần mềm"
+                  >
+                    Cập nhật tài khoản Gmail
                   </button>
                 </div>
-              ))
-            ) : (
-              <p className="muted">Chưa có token Gmail được kết nối.</p>
-            )}
-            <div className="inlineActions">
-              <button
-                onClick={() =>
-                  window.open(
-                    API + "/api/auth/start",
-                    "_blank",
-                    "noopener,noreferrer",
-                  )
-                }
-              >
-                Kết nối / làm mới Gmail
-              </button>
-              <button
-                className="secondary"
-                onClick={refresh}
-                title="Đọc lại tài khoản Gmail đã kết nối, không cập nhật phiên bản phần mềm"
-              >
-                Cập nhật tài khoản Gmail
-              </button>
-            </div>
-            <p className="hint">
-              Token còn refresh token sẽ được tự làm mới và lưu lại. Nếu bị thu
-              hồi, hãy kết nối Gmail lại.
-            </p>
-          </section>
-          <section className="configbox">
-            <h3>Thông tin chạy Get Label</h3>
-            <label className="field">
-              Tên account Poshmark
-              <input
-                value={accountName}
-                onChange={(e) => setAccountName(e.target.value)}
-                placeholder="Nhập tên account:"
-                autoComplete="off"
-              />
-            </label>
-            <label className="field">
-              Tên tab Google Sheets
-              <input
-                value={sheetName}
-                onChange={(e) => changeSheetName(e.target.value)}
-                placeholder="Ví dụ: Đơn Poshmark"
-                autoComplete="off"
-              />
-            </label>
-            <label className="field">
-              Tài khoản Gmail
-              <select
-                value={tokenFile}
-                onChange={(e) => setTokenFile(e.target.value)}
-              >
-                <option value="">-- Chọn Gmail --</option>
-                {gmail.accounts?.map((account) => (
-                  <option key={account.file} value={account.file}>
-                    {account.email}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <p className="hint">
-              Tên account Poshmark không được lưu. Tên tab sẽ được lưu trên máy
-              và tự điền lần sau.
-            </p>
-          </section>
-          <aside className="notice" role="note">
-            <strong>Lưu ý: thao tác trên dữ liệu thật</strong>
-            <p>
-              Get Label ghi vào Google Sheets và đánh dấu email đã xử lý là đã
-              đọc. Kiểm tra đúng Gmail, Sheet và tên tab trước khi chạy.
-            </p>
-          </aside>
-          <section className="runbox">
-            <div>
-              <h3>Chạy lấy đơn</h3>
-              <p>
-                Quét email chưa đọc, bỏ qua Order ID đã có trong Sheet, ghi dữ
-                liệu vào tab “{sheetName || "đã chọn"}”.
-              </p>
-            </div>
-            <button
-              disabled={
-                getBusy ||
-                !sheetId ||
-                !gmail.accounts?.length ||
-                !accountName.trim() ||
-                !sheetName.trim() ||
-                !tokenFile
-              }
-              onClick={runGet}
-            >
-              {getBusy ? "Đang chạy…" : "Chạy Get Label"}
-            </button>
-          </section>
-          {getOutput && (
-            <section className="logs">
-              <div className="linehead">
-                <h3>Kết quả / Log</h3>
+                <p className="hint">
+                  Token còn refresh token sẽ được tự làm mới và lưu lại. Nếu bị
+                  thu hồi, hãy kết nối Gmail lại.
+                </p>
+              </section>
+              <section className="configbox">
+                <h3>Thông tin chạy Get Label</h3>
+                <label className="field">
+                  Tên account Poshmark
+                  <input
+                    value={accountName}
+                    onChange={(e) => setAccountName(e.target.value)}
+                    placeholder="Nhập tên account:"
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="field">
+                  Tên tab Google Sheets
+                  <input
+                    value={sheetName}
+                    onChange={(e) => changeSheetName(e.target.value)}
+                    placeholder="Ví dụ: Đơn Poshmark"
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="field">
+                  Tài khoản Gmail
+                  <select
+                    value={tokenFile}
+                    onChange={(e) => setTokenFile(e.target.value)}
+                  >
+                    <option value="">-- Chọn Gmail --</option>
+                    {gmail.accounts?.map((account) => (
+                      <option key={account.file} value={account.file}>
+                        {account.email}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="hint">
+                  Tên account Poshmark không được lưu. Tên tab sẽ được lưu trên
+                  máy và tự điền lần sau.
+                </p>
+              </section>
+              <aside className="notice" role="note">
+                <strong>Lưu ý: thao tác trên dữ liệu thật</strong>
+                <p>
+                  Get Label ghi vào Google Sheets và đánh dấu email đã xử lý là
+                  đã đọc. Kiểm tra đúng Gmail, Sheet và tên tab trước khi chạy.
+                </p>
+              </aside>
+              <section className="runbox">
+                <div>
+                  <h3>Chạy lấy đơn</h3>
+                  <p>
+                    Quét email chưa đọc, bỏ qua Order ID đã có trong Sheet, ghi
+                    dữ liệu vào tab “{sheetName || "đã chọn"}”.
+                  </p>
+                </div>
                 <button
-                  className="ghost small"
-                  onClick={() => setGetOutput("")}
+                  disabled={
+                    getBusy ||
+                    !sheetId ||
+                    !gmail.accounts?.length ||
+                    !accountName.trim() ||
+                    !sheetName.trim() ||
+                    !tokenFile
+                  }
+                  onClick={runGet}
                 >
-                  Xóa log
+                  {getBusy ? "Đang chạy…" : "Chạy Get Label"}
                 </button>
-              </div>
-              <pre>{getOutput}</pre>
-            </section>
+              </section>
+              {getOutput && (
+                <section className="logs">
+                  <div className="linehead">
+                    <h3>Kết quả / Log</h3>
+                    <button
+                      className="ghost small"
+                      onClick={() => setGetOutput("")}
+                    >
+                      Xóa log
+                    </button>
+                  </div>
+                  <pre>{getOutput}</pre>
+                </section>
+              )}
+            </>
           )}
         </main>
       ) : (

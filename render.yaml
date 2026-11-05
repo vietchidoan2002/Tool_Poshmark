@@ -1,0 +1,11 @@
+# Free static preview: no database, no Google credentials, no server-side APIs.
+services:
+  - type: web
+    name: poshmark-label-preview
+    runtime: static
+    branch: preview/ui-single-pass-ocr
+    buildCommand: npm ci --include=dev && npm run build:preview
+    staticPublishPath: ./dist
+    envVars:
+      - key: VITE_PREVIEW_ONLY
+        value: "true"
