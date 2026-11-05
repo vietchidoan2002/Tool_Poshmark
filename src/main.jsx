@@ -159,6 +159,7 @@ function App() {
   const [page, setPage] = useState(PREVIEW_ONLY ? "cut" : "get");
   const [webMode, setWebMode] = useState(PREVIEW_ONLY);
   const [authenticated, setAuthenticated] = useState(false);
+  const [authError, setAuthError] = useState("");
   const [phoneReady, setPhoneReady] = useState(true);
   const authUser = useRef(null);
   const refreshGeneration = useRef(0);
@@ -206,7 +207,13 @@ function App() {
       const sessionResponse = await fetch(API + "/api/session");
       if (!sessionResponse.ok) throw new Error("Session unavailable");
       const session = await sessionResponse.json();
+      if (
+        typeof session.webMode !== "boolean" ||
+        typeof session.authenticated !== "boolean"
+      )
+        throw new Error("Invalid session response");
       if (generation !== refreshGeneration.current) return;
+      setAuthError("");
       setWebMode(!!session.webMode);
       setAuthenticated(!!session.authenticated);
       if (session.webMode && authUser.current !== session.userId) {
@@ -238,6 +245,10 @@ function App() {
           : g.accounts?.[0]?.file || "",
       );
     } catch {
+      if (generation !== refreshGeneration.current) return;
+      setAuthError(
+        "Chưa đọc được trạng thái đăng nhập từ máy chủ. Bạn vẫn có thể dùng Cut Label; bấm thử lại để kết nối tài khoản.",
+      );
       setConfigMsg(
         "Không kết nối được máy chủ. Hãy kiểm tra kết nối hoặc khởi động lại tool.",
       );
@@ -628,7 +639,24 @@ function App() {
           <h1>Poshmark Label Manager</h1>
           <p>Đơn hàng gọn gàng. Label sẵn sàng.</p>
         </div>
+        {!PREVIEW_ONLY && webMode && !authenticated && (
+          <div className="account-actions">
+            <button className="secondary" onClick={connectGoogle}>
+              Đăng nhập
+            </button>
+            <button onClick={connectGoogle}>Đăng ký</button>
+          </div>
+        )}
       </header>
+      {authError && !PREVIEW_ONLY && (
+        <aside className="warning" role="alert">
+          <strong>Kết nối tài khoản chưa sẵn sàng</strong>
+          <p>{authError}</p>
+          <button className="secondary" onClick={refresh}>
+            Thử lại kết nối
+          </button>
+        </aside>
+      )}
       {webMode && authenticated && (
         <div className="inlineActions">
           <button className="secondary" onClick={logout} disabled={getBusy}>
@@ -685,12 +713,12 @@ function App() {
               <h3>
                 {PREVIEW_ONLY
                   ? "Gmail/Sheets sẽ được bổ sung sau"
-                  : "Gmail và Sheets của riêng bạn"}
+                  : "Đăng nhập hoặc tạo tài khoản"}
               </h3>
               <p>
                 {PREVIEW_ONLY
                   ? "Bản xem thử chưa bật tài khoản Google. Chọn Cut Label để thử quét và xuất PDF ngay trong trình duyệt."
-                  : "Đăng nhập Google để kết nối tài khoản và lưu Sheet ID riêng. Bạn vẫn có thể dùng Cut Label mà không cần đăng nhập."}
+                  : "Dùng Google để đăng nhập. Lần đầu kết nối sẽ tự tạo tài khoản, sau đó bạn nhập số điện thoại và Sheet ID riêng. Không cần tạo mật khẩu mới. Bạn vẫn có thể dùng Cut Label mà không đăng nhập."}
               </p>
               <div className="inlineActions">
                 {!PREVIEW_ONLY && (

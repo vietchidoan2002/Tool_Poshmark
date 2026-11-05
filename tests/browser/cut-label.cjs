@@ -80,6 +80,11 @@ async function open(t, options = {}) {
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
+      if (url.pathname === "/api/session" && options.sessionFailure)
+        return route.fulfill({
+          status: 503,
+          json: { error: "test unavailable" },
+        });
       if (url.pathname === "/api/session" && options.webMode)
         return route.fulfill({
           json: {
@@ -88,6 +93,8 @@ async function open(t, options = {}) {
             userId: options.signedIn ? "test-user" : null,
           },
         });
+      if (url.pathname === "/api/session" && !options.webMode)
+        return route.fulfill({ json: { webMode: false, authenticated: true } });
       if (url.pathname === "/api/profile" && options.webMode)
         return route.fulfill({
           json: options.phoneProfile || {
@@ -650,5 +657,44 @@ test("phone admin can list, edit, review and cancel or confirm deletion", async 
   await page.getByRole("button", { name: "Xóa số", exact: true }).click();
   await page.waitForFunction(
     () => document.querySelector(".phone-account input")?.value === "",
+  );
+});
+
+test("web login and registration are visible from Cut Label and use the Google account flow", async (t) => {
+  const page = await open(t, { webMode: true });
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Đăng nhập", exact: true })
+      .isVisible(),
+    true,
+  );
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Đăng ký", exact: true })
+      .isVisible(),
+    true,
+  );
+  await page.route("**/api/auth/start", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: "Test Google authentication entrypoint",
+    }),
+  );
+  await page.getByRole("button", { name: "Đăng ký", exact: true }).click();
+  await page.waitForURL("**/api/auth/start");
+});
+
+test("failed session lookup is visible and retry restores login without discarding labels", async (t) => {
+  const options = { webMode: true, sessionFailure: true };
+  const page = await open(t, options);
+  await page.getByRole("button", { name: "Thử lại kết nối" }).waitFor();
+  await upload(page, pdf(await fixture()), 1);
+  options.sessionFailure = false;
+  await page.getByRole("button", { name: "Thử lại kết nối" }).click();
+  await page.getByRole("button", { name: "Đăng nhập", exact: true }).waitFor();
+  assert.equal(await page.locator(".page input").inputValue(), ID);
+  assert.equal(
+    await page.getByRole("button", { name: "Thử lại kết nối" }).count(),
+    0,
   );
 });
