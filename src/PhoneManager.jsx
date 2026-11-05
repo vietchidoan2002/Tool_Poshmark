@@ -173,7 +173,7 @@ export default function PhoneManager({ onEligibility }) {
                 <button disabled={busy}>Tìm / tải danh sách</button>
               </form>
               <p className="hint">
-                Danh sách chỉ có tài khoản đã đăng nhập Google. Sửa số sẽ bỏ
+                Danh sách gồm tài khoản website và tài khoản Google. Sửa số sẽ bỏ
                 trạng thái kiểm tra cũ; không thể đổi quyền quản trị từ đây.
               </p>
               {rows.map((user) => (

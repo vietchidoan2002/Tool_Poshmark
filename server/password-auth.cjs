@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const { promisify } = require("node:util");
 const derive = promisify(crypto.scrypt);
 const { rateLimit } = require("express-rate-limit");
+const { normalizePhone } = require("./phones.cjs");
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const emailAddress = (value) => {
   const email = String(value || "")
@@ -117,7 +118,7 @@ async function createAccountStore(pool) {
         ).rows[0]
       );
     },
-    async register(email, name, hash) {
+    async register(email, name, hash, phone) {
       const client = await pool.connect();
       const id = "pw:" + crypto.randomUUID();
       try {
@@ -134,6 +135,18 @@ async function createAccountStore(pool) {
             409,
             "Email đã có tài khoản. Hãy đăng nhập hoặc dùng Quên mật khẩu.",
           );
+        if (
+          (
+            await client.query(
+              "SELECT user_id FROM pm_phone_profiles WHERE phone=$1",
+              [phone],
+            )
+          ).rows.length
+        )
+          throw fail(
+            409,
+            "Email hoặc số điện thoại đã được sử dụng. Hãy đăng nhập hoặc liên hệ quản trị viên.",
+          );
         await client.query("INSERT INTO pm_users(id,email) VALUES($1,$2)", [
           id,
           email,
@@ -142,6 +155,10 @@ async function createAccountStore(pool) {
           "INSERT INTO pm_password_accounts(user_id,email,display_name,password_hash,terms_version) VALUES($1,$2,$3,$4,$5)",
           [id, email, name, hash, "2026-11-v1"],
         );
+        await client.query(
+          "INSERT INTO pm_phone_profiles(user_id,phone) VALUES($1,$2)",
+          [id, phone],
+        );
         await client.query("COMMIT");
         return id;
       } catch (error) {
@@ -149,7 +166,7 @@ async function createAccountStore(pool) {
         if (error.code === "23505")
           throw fail(
             409,
-            "Email đã có tài khoản. Hãy đăng nhập hoặc dùng Quên mật khẩu.",
+            "Email hoặc số điện thoại đã được sử dụng. Hãy đăng nhập hoặc liên hệ quản trị viên.",
           );
         throw error;
       } finally {
@@ -463,12 +480,13 @@ async function mountPasswordAuth(app, pool, config, deps) {
         throw fail(400, "Hai mật khẩu không khớp.");
       if (req.body?.acceptTerms !== true)
         throw fail(400, "Bạn cần đồng ý Điều khoản và Chính sách bảo mật.");
+      const phone = normalizePhone(req.body?.phone);
       const id = await accounts.register(
         email,
         name,
         await hashPassword(password),
+        phone,
       );
-      await authenticate(req, id, false);
       let emailSent = false;
       if (sendEmail)
         try {

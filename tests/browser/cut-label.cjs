@@ -91,10 +91,29 @@ async function open(t, options = {}) {
             webMode: true,
             authenticated: !!options.signedIn,
             userId: options.signedIn ? "test-user" : null,
+            emailVerified:
+              !!options.signedIn && options.emailVerified !== false,
           },
         });
       if (url.pathname === "/api/session" && !options.webMode)
         return route.fulfill({ json: { webMode: false, authenticated: true } });
+      if (url.pathname === "/api/auth/options")
+        return route.fulfill({
+          json: { passwordAuth: true, emailConfigured: true },
+        });
+      if (url.pathname === "/api/account")
+        return route.fulfill({
+          json: {
+            passwordAccount: true,
+            emailVerified: options.emailVerified !== false,
+            email: "test@example.test",
+            emailConfigured: true,
+          },
+        });
+      if (url.pathname === "/api/logout") {
+        options.signedIn = false;
+        return route.fulfill({ json: { ok: true } });
+      }
       if (url.pathname === "/api/profile" && options.webMode)
         return route.fulfill({
           json: options.phoneProfile || {
@@ -154,7 +173,11 @@ async function open(t, options = {}) {
     return route.abort();
   });
   await page.goto(BASE);
-  await page.getByRole("button", { name: /Cut Label/ }).click();
+  if (
+    !options.sessionFailure &&
+    (!options.webMode || (options.signedIn && options.emailVerified !== false))
+  )
+    await page.getByRole("button", { name: /Cut Label/ }).click();
   return page;
 }
 async function upload(page, files, count) {
@@ -551,22 +574,24 @@ test("refreshing Gmail does not overwrite an unsaved Sheet ID", async (t) => {
   );
 });
 
-test("web guests can use Cut Label without exposing Gmail configuration", async (t) => {
+test("web root requires sign-in before either tool and has no guest bypass", async (t) => {
   const page = await open(t, { webMode: true });
-  await page.getByRole("button", { name: /Get Label/ }).click();
+  await page.getByRole("heading", { name: "Đăng nhập", exact: true }).waitFor();
   assert.equal(
     await page
-      .getByRole("button", { name: "Đăng nhập bằng Google" })
-      .isVisible(),
-    true,
+      .getByRole("button", { name: /Cut Label|Get Label|Quay lại công cụ/ })
+      .count(),
+    0,
   );
   assert.equal(
     await page.getByLabel("Spreadsheet ID", { exact: true }).count(),
     0,
   );
-  await page.getByRole("button", { name: /Cut Label/ }).click();
-  await upload(page, pdf(await fixture()), 1);
-  assert.equal(await page.locator(".page input").inputValue(), ID);
+  await page.evaluate(() => {
+    window.location.hash = "/cut";
+  });
+  await page.getByRole("heading", { name: "Đăng nhập", exact: true }).waitFor();
+  assert.equal(await page.locator('input[type="file"]').count(), 0);
 });
 
 test("version notice never reloads a page containing unexported labels", async (t) => {
@@ -592,7 +617,9 @@ test("signed-in users can save a phone without claiming SMS or SIM verification"
       phoneRequired: true,
     },
   });
-  await page.getByRole("button", { name: /Get Label/ }).click();
+  await page
+    .getByRole("button", { name: "Hồ sơ / Quản trị", exact: true })
+    .click();
   await page
     .getByLabel("Số điện thoại của bạn", { exact: true })
     .fill("0901 234 567");
@@ -636,7 +663,9 @@ test("phone admin can list, edit, review and cancel or confirm deletion", async 
     },
     phoneUsers: users,
   });
-  await page.getByRole("button", { name: /Get Label/ }).click();
+  await page
+    .getByRole("button", { name: "Hồ sơ / Quản trị", exact: true })
+    .click();
   await page
     .getByText("Quản trị · số điện thoại người dùng", { exact: true })
     .click();
@@ -662,7 +691,7 @@ test("phone admin can list, edit, review and cancel or confirm deletion", async 
 
 test("web login and registration open real forms while Google remains an alternative", async (t) => {
   const page = await open(t, { webMode: true });
-  await page.getByRole("button", { name: "Đăng ký", exact: true }).click();
+  await page.getByRole("button", { name: "Đăng ký ngay", exact: true }).click();
   await page
     .getByRole("heading", { name: "Tạo tài khoản", exact: true })
     .waitFor();
@@ -684,19 +713,17 @@ test("web login and registration open real forms while Google remains an alterna
   await page.waitForURL("**/api/auth/start");
 });
 
-test("failed session lookup is visible and retry restores login without discarding labels", async (t) => {
+test("failed initial session lookup blocks tools and retry restores sign-in", async (t) => {
   const options = { webMode: true, sessionFailure: true };
   const page = await open(t, options);
   await page.getByRole("button", { name: "Thử lại kết nối" }).waitFor();
-  await upload(page, pdf(await fixture()), 1);
-  options.sessionFailure = false;
-  await page.getByRole("button", { name: "Thử lại kết nối" }).click();
-  await page.getByRole("button", { name: "Đăng nhập", exact: true }).waitFor();
-  assert.equal(await page.locator(".page input").inputValue(), ID);
   assert.equal(
-    await page.getByRole("button", { name: "Thử lại kết nối" }).count(),
+    await page.getByRole("button", { name: /Cut Label|Get Label/ }).count(),
     0,
   );
+  options.sessionFailure = false;
+  await page.getByRole("button", { name: "Thử lại kết nối" }).click();
+  await page.getByRole("heading", { name: "Đăng nhập", exact: true }).waitFor();
 });
 
 test("auth forms show/hide passwords, validate confirmation and terms, and switch to recovery", async (t) => {
@@ -704,8 +731,9 @@ test("auth forms show/hide passwords, validate confirmation and terms, and switc
   await page.route("**/api/auth/options", (r) =>
     r.fulfill({ json: { passwordAuth: true, emailConfigured: true } }),
   );
-  await page.getByRole("button", { name: "Đăng ký", exact: true }).click();
+  await page.getByRole("button", { name: "Đăng ký ngay", exact: true }).click();
   await page.getByLabel("Họ và tên", { exact: true }).fill("Test User");
+  await page.getByLabel("Số điện thoại", { exact: true }).fill("0901234567");
   await page.getByLabel("Email", { exact: true }).fill("test@example.test");
   const password = page.getByLabel("Mật khẩu", { exact: true });
   await password.fill("test-password");
@@ -792,4 +820,156 @@ test("mobile auth page fits the viewport and resets password with a one-time fra
     .fill("new-test-password");
   await page.getByRole("button", { name: "Lưu mật khẩu mới" }).click();
   assert.match(await page.getByRole("status").textContent(), /Đã đổi mật khẩu/);
+});
+
+test("registration collects phone, returns to sign-in and keeps tools locked until email activation", async (t) => {
+  const options = { webMode: true };
+  const page = await open(t, options);
+  let registration;
+  await page.route("**/api/auth/register", (route) => {
+    registration = route.request().postDataJSON();
+    return route.fulfill({ status: 201, json: { ok: true, emailSent: true } });
+  });
+  await page.getByRole("button", { name: "Đăng ký ngay" }).click();
+  await page.getByLabel("Họ và tên", { exact: true }).fill("Test User");
+  await page.getByLabel("Email", { exact: true }).fill("test@example.test");
+  await page.getByLabel("Mật khẩu", { exact: true }).fill("test-password");
+  await page
+    .getByLabel("Xác nhận mật khẩu", { exact: true })
+    .fill("test-password");
+  await page.getByRole("checkbox").check();
+  await page
+    .getByRole("button", { name: "Tạo tài khoản", exact: true })
+    .click();
+  assert.equal(registration, undefined, "phone is required before submitting");
+  await page.getByLabel("Số điện thoại", { exact: true }).fill("0901234567");
+  await page
+    .getByRole("button", { name: "Tạo tài khoản", exact: true })
+    .click();
+  await page.getByRole("heading", { name: "Đăng nhập", exact: true }).waitFor();
+  assert.equal(registration.phone, "0901234567");
+  assert.match(
+    await page.getByRole("status").textContent(),
+    /gửi email xác nhận/,
+  );
+  assert.equal(
+    await page.getByRole("button", { name: /Get Label|Cut Label/ }).count(),
+    0,
+  );
+  await page.route("**/api/auth/login", (route) => {
+    options.signedIn = true;
+    options.emailVerified = false;
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.getByLabel("Mật khẩu", { exact: true }).fill("test-password");
+  await page.getByRole("button", { name: "Đăng nhập", exact: true }).click();
+  await page.getByRole("heading", { name: "Xác nhận email của bạn" }).waitFor();
+  assert.equal(
+    await page.getByRole("button", { name: /Get Label|Cut Label/ }).count(),
+    0,
+  );
+  await page.route("**/api/auth/resend-verification", (route) =>
+    route.fulfill({ json: { ok: true } }),
+  );
+  await page.getByRole("button", { name: "Gửi lại email xác nhận" }).click();
+  assert.match(await page.getByRole("status").textContent(), /Kiểm tra email/);
+  await page.route("**/api/auth/verify-email", (route) => {
+    assert.equal(route.request().postDataJSON().token, "test-activation-token");
+    options.emailVerified = true;
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.evaluate(() => {
+    window.location.hash = "/verify-email?token=test-activation-token";
+  });
+  await page
+    .getByRole("button", { name: "Xác nhận email", exact: true })
+    .click();
+  await page.getByRole("heading", { name: "Get Label", exact: true }).waitFor();
+  assert.equal(
+    await page.getByLabel("Số điện thoại của bạn", { exact: true }).count(),
+    0,
+  );
+  await page
+    .getByRole("button", { name: "Hồ sơ / Quản trị", exact: true })
+    .click();
+  await page.getByLabel("Số điện thoại của bạn", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Đăng xuất", exact: true }).click();
+  await page.getByRole("heading", { name: "Đăng nhập", exact: true }).waitFor();
+});
+
+test("verification links require sign-in and preserve the token through sign-in", async (t) => {
+  const options = { webMode: true };
+  const page = await open(t, options);
+  await page.evaluate(() => {
+    window.location.hash = "/verify-email?token=guest-activation-token";
+  });
+  await page
+    .getByText(
+      "Đăng nhập bằng email nhận liên kết để hoàn tất xác nhận tài khoản.",
+    )
+    .waitFor();
+  assert.ok(!page.url().includes("token="));
+  await page.route("**/api/auth/login", (route) => {
+    options.signedIn = true;
+    options.emailVerified = false;
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.getByLabel("Email", { exact: true }).fill("test@example.test");
+  await page.getByLabel("Mật khẩu", { exact: true }).fill("test-password");
+  await page.getByRole("button", { name: "Đăng nhập", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "Xác nhận email", exact: true })
+    .waitFor();
+  await page.route("**/api/auth/verify-email", (route) => {
+    assert.equal(
+      route.request().postDataJSON().token,
+      "guest-activation-token",
+    );
+    return route.fulfill({
+      status: 400,
+      json: { error: "Liên kết không hợp lệ hoặc đã hết hạn." },
+    });
+  });
+  await page
+    .getByRole("button", { name: "Xác nhận email", exact: true })
+    .click();
+  await page.getByRole("alert").waitFor();
+  assert.equal(
+    await page.getByRole("button", { name: /Get Label|Cut Label/ }).count(),
+    0,
+  );
+});
+
+test("logout protects unexported PDFs, reports failure and clears results after success", async (t) => {
+  const options = { webMode: true, signedIn: true };
+  const page = await open(t, options);
+  await upload(page, pdf(await fixture()), 1);
+  let calls = 0,
+    fail = true;
+  await page.route("**/api/logout", (route) => {
+    calls++;
+    if (fail)
+      return route.fulfill({ status: 503, json: { error: "Test offline" } });
+    options.signedIn = false;
+    return route.fulfill({ json: { ok: true } });
+  });
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "Đăng xuất", exact: true }).click();
+  assert.equal(calls, 0);
+  assert.equal(await page.locator(".page").count(), 1);
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Đăng xuất", exact: true }).click();
+  await page.getByRole("alert").waitFor();
+  assert.equal(await page.locator(".page").count(), 1);
+  fail = false;
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Đăng xuất", exact: true }).click();
+  await page.getByRole("heading", { name: "Đăng nhập", exact: true }).waitFor();
+  options.signedIn = true;
+  await page.evaluate(() => {
+    window.location.hash = "";
+    window.dispatchEvent(new Event("focus"));
+  });
+  await page.getByRole("button", { name: /Cut Label/ }).click();
+  assert.equal(await page.locator(".page").count(), 0);
 });

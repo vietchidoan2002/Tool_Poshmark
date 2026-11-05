@@ -132,12 +132,18 @@ async function createWebApp(config, deps = {}) {
     oauthFactory: oauth,
   });
   store.isVerified = passwordAuth.isVerified;
-  app.get("/api/session", (req, res) =>
-    res.json({
-      webMode: true,
-      authenticated: !!req.session.userId,
-      userId: req.session.userId || null,
-    }),
+  app.get(
+    "/api/session",
+    asyncRoute(async (req, res) =>
+      res.json({
+        webMode: true,
+        authenticated: !!req.session.userId,
+        userId: req.session.userId || null,
+        emailVerified: req.session.userId
+          ? await passwordAuth.isVerified(req.session.userId)
+          : false,
+      }),
+    ),
   );
   app.get(
     "/api/auth/start",
@@ -264,7 +270,7 @@ async function createWebApp(config, deps = {}) {
     if (!req.session.userId)
       return res
         .status(401)
-        .json({ error: "Hãy đăng nhập Google để sử dụng Gmail/Sheets." });
+        .json({ error: "Hãy đăng nhập để sử dụng công cụ." });
     // Browser writes must come from this deployment, even with a valid cookie.
     if (
       !["GET", "HEAD", "OPTIONS"].includes(req.method) &&
@@ -273,8 +279,6 @@ async function createWebApp(config, deps = {}) {
       return res.status(403).json({ error: "Nguồn yêu cầu không hợp lệ." });
     next();
   });
-  const { mountPhones } = require("./phones.cjs");
-  const phones = await mountPhones(app, pool, store, config);
   app.post(
     "/api/logout",
     asyncRoute(async (req, res) => {
@@ -290,6 +294,18 @@ async function createWebApp(config, deps = {}) {
       res.json({ ok: true });
     }),
   );
+  app.use(
+    "/api",
+    asyncRoute(async (req, res, next) => {
+      if (!(await passwordAuth.isVerified(req.session.userId)))
+        return res
+          .status(403)
+          .json({ error: "Hãy xác nhận email trước khi sử dụng công cụ." });
+      next();
+    }),
+  );
+  const { mountPhones } = require("./phones.cjs");
+  const phones = await mountPhones(app, pool, store, config);
   app.get(
     "/api/config",
     asyncRoute(async (req, res) => {

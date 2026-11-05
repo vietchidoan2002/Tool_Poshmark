@@ -15,9 +15,12 @@ export default function AuthPage({
   onBack,
   onAuth,
   onGoogle,
+  verificationPending,
+  backLabel = "← Quay lại công cụ",
 }) {
   const [email, setEmail] = useState(""),
     [name, setName] = useState(""),
+    [phone, setPhone] = useState(""),
     [password, setPassword] = useState(""),
     [confirm, setConfirm] = useState("");
   const [show, setShow] = useState(false),
@@ -28,6 +31,7 @@ export default function AuthPage({
     [error, setError] = useState(""),
     [success, setSuccess] = useState(""),
     [options, setOptions] = useState(null);
+  const [registrationNotice, setRegistrationNotice] = useState("");
   const lock = useRef(false),
     generation = useRef(0);
   useEffect(() => {
@@ -84,6 +88,7 @@ export default function AuthPage({
         body: JSON.stringify({
           email: email.trim(),
           name: name.trim(),
+          phone: phone.trim(),
           password,
           confirmPassword: confirm,
           remember,
@@ -97,7 +102,14 @@ export default function AuthPage({
       if (current !== generation.current) return;
       setPassword("");
       setConfirm("");
-      if (mode === "login" || mode === "register" || mode === "verify-email")
+      if (mode === "register") {
+        setRegistrationNotice(
+          data.emailSent
+            ? "Đã tạo tài khoản và gửi email xác nhận. Hãy đăng nhập, rồi mở liên kết trong email để kích hoạt tài khoản."
+            : "Đã tạo tài khoản nhưng chưa gửi được email xác nhận. Hãy đăng nhập để gửi lại hoặc liên hệ quản trị viên.",
+        );
+        onNavigate("login");
+      } else if (mode === "login" || mode === "verify-email")
         await onAuth(mode);
       else
         setSuccess(
@@ -196,6 +208,17 @@ export default function AuthPage({
                       ? "Chọn mật khẩu mới từ 8 đến 128 ký tự. Liên kết chỉ được dùng một lần."
                       : "Đăng nhập đúng tài khoản vừa đăng ký, rồi xác nhận email bằng liên kết đã nhận."}
             </p>
+            {mode === "login" && registrationNotice && (
+              <p className="auth-success" role="status">
+                {registrationNotice}
+              </p>
+            )}
+            {mode === "login" && verificationPending && (
+              <p className="notice">
+                Đăng nhập bằng email nhận liên kết để hoàn tất xác nhận tài
+                khoản.
+              </p>
+            )}
             {options?.emailConfigured === false &&
               (mode === "register" || mode === "forgot") && (
                 <aside className="warning">
@@ -233,6 +256,29 @@ export default function AuthPage({
                     maxLength={254}
                     disabled={busy}
                   />
+                </label>
+              )}
+              {mode === "register" && (
+                <label className="field">
+                  Số điện thoại
+                  <input
+                    aria-label="Số điện thoại"
+                    name="phone"
+                    type="tel"
+                    inputMode="tel"
+                    autoComplete="tel"
+                    required
+                    maxLength={40}
+                    value={phone}
+                    onChange={(event) => setPhone(event.target.value)}
+                    disabled={busy}
+                    placeholder="0901234567 hoặc +84901234567"
+                    aria-describedby="registration-phone-help"
+                  />
+                  <small id="registration-phone-help" className="hint">
+                    Nhập số đang sử dụng. Quản trị viên có thể liên hệ và kiểm
+                    tra sau.
+                  </small>
                 </label>
               )}
               {["login", "register", "reset-password"].includes(mode) &&
@@ -365,36 +411,46 @@ export default function AuthPage({
             </p>
           </>
         )}
-        <button
-          className="text-button auth-back"
-          onClick={onBack}
-          disabled={busy}
-        >
-          ← Quay lại công cụ
-        </button>
+        {onBack && (
+          <button
+            className="text-button auth-back"
+            onClick={onBack}
+            disabled={busy}
+          >
+            {backLabel}
+          </button>
+        )}
       </main>
       <footer>Poshmark Label Manager · Công cụ quản lý label miễn phí</footer>
     </div>
   );
 }
 
-export function AccountNotice() {
+export function ActivationPage({ onLogout, onRefresh, logoutError }) {
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [account, setAccount] = useState(null),
     [message, setMessage] = useState(""),
     [busy, setBusy] = useState(false);
   useEffect(() => {
     let active = true;
     fetch("/api/account")
-      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => {
+        if (!r.ok)
+          throw Error(
+            "Chưa tải được thông tin tài khoản. Hãy thử kiểm tra lại.",
+          );
+        return r.json();
+      })
       .then((data) => {
         if (active) setAccount(data);
       })
-      .catch(() => {});
+      .catch((error) => {
+        if (active) setMessage(error.message);
+      });
     return () => {
       active = false;
     };
-  }, []);
-  if (!account?.passwordAccount || account.emailVerified) return null;
+  }, [loadAttempt]);
   async function resend() {
     if (busy) return;
     setBusy(true);
@@ -406,27 +462,71 @@ export function AccountNotice() {
       if (!r.ok) throw Error(data.error);
       setMessage("Đã gửi yêu cầu xác nhận. Kiểm tra email và thư rác.");
     } catch (error) {
-      setMessage(error.message);
+      setMessage(
+        error.message || "Không kết nối được máy chủ. Vui lòng thử lại.",
+      );
     } finally {
       setBusy(false);
     }
   }
   return (
-    <aside className="notice">
-      <strong>Hãy xác nhận email tài khoản</strong>
-      <p>
-        {account.emailConfigured
-          ? "Kiểm tra hộp thư để xác nhận email trước khi kết nối Gmail/Sheets."
-          : "Quản trị viên chưa bật gửi email. Tài khoản chưa thể kết nối Gmail/Sheets cho đến khi email được xác nhận."}
-      </p>
-      <button
-        className="secondary"
-        onClick={resend}
-        disabled={busy || !account.emailConfigured}
-      >
-        {busy ? "Đang gửi…" : "Gửi lại email xác nhận"}
-      </button>
-      {message && <p role="status">{message}</p>}
-    </aside>
+    <div className="auth-shell">
+      <header className="top">
+        <div className="logo">PM</div>
+        <div className="headcopy">
+          <h1>Poshmark Label Manager</h1>
+          <p>Kích hoạt tài khoản để bắt đầu.</p>
+        </div>
+      </header>
+      <main className="auth-card" aria-labelledby="activation-title">
+        <span className="pill">Bước cuối cùng</span>
+        <h2 id="activation-title">Xác nhận email của bạn</h2>
+        {logoutError && (
+          <p className="warning" role="alert">
+            {logoutError}
+          </p>
+        )}
+        {account?.email && (
+          <p>
+            <strong>{account.email}</strong>
+          </p>
+        )}
+        <p>
+          {!account
+            ? message
+              ? "Bấm Kiểm tra lại để tải lại thông tin tài khoản."
+              : "Đang tải thông tin tài khoản…"
+            : account.emailConfigured
+              ? "Mở email xác nhận và bấm vào liên kết để kích hoạt tài khoản. Hãy kiểm tra cả mục Thư rác."
+              : "Chưa thể gửi email xác nhận. Vui lòng liên hệ quản trị viên để hoàn tất cấu hình gửi email."}
+        </p>
+        <button
+          className="secondary"
+          onClick={resend}
+          disabled={busy || !account?.emailConfigured}
+        >
+          {busy ? "Đang gửi…" : "Gửi lại email xác nhận"}
+        </button>
+        {message && (
+          <p className="notice" role="status">
+            {message}
+          </p>
+        )}
+        <div className="inlineActions">
+          <button
+            className="secondary"
+            onClick={() => {
+              setLoadAttempt((value) => value + 1);
+              onRefresh();
+            }}
+          >
+            Tôi đã xác nhận · Kiểm tra lại
+          </button>
+          <button className="text-button" onClick={onLogout}>
+            Đăng xuất
+          </button>
+        </div>
+      </main>
+    </div>
   );
 }

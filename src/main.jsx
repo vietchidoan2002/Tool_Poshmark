@@ -6,7 +6,7 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createWorker } from "tesseract.js";
 import "./style.css";
 import PhoneManager from "./PhoneManager.jsx";
-import AuthPage, { AccountNotice } from "./AuthPage.jsx";
+import AuthPage, { ActivationPage } from "./AuthPage.jsx";
 import {
   extractOrderId,
   extractUspsTracking,
@@ -218,7 +218,10 @@ function App() {
   const [page, setPage] = useState(PREVIEW_ONLY ? "cut" : "get");
   const [webMode, setWebMode] = useState(PREVIEW_ONLY);
   const [authenticated, setAuthenticated] = useState(false);
+  const [sessionReady, setSessionReady] = useState(PREVIEW_ONLY);
+  const [emailVerified, setEmailVerified] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [logoutError, setLogoutError] = useState("");
   const [phoneReady, setPhoneReady] = useState(true);
   const authUser = useRef(null);
   const refreshGeneration = useRef(0);
@@ -275,6 +278,8 @@ function App() {
       setAuthError("");
       setWebMode(!!session.webMode);
       setAuthenticated(!!session.authenticated);
+      setEmailVerified(session.emailVerified === true);
+      setSessionReady(true);
       if (session.webMode && authUser.current !== session.userId) {
         authUser.current = session.userId || null;
         sheetDraft.current = null;
@@ -282,17 +287,26 @@ function App() {
         setSheetName("");
         setAccountName("");
         setGetOutput("");
+        setPhoneReady(false);
       }
       if (session.webMode && !session.authenticated) {
         setGmail({ credentialsPresent: true, accounts: [] });
         setTokenFile("");
         return;
       }
-      const [c, g] = await Promise.all([
+      if (session.webMode && !session.emailVerified) return;
+      const [c, g, profile] = await Promise.all([
         fetch(API + "/api/config").then((r) => r.json()),
         fetch(API + "/api/gmail/status").then((r) => r.json()),
+        session.webMode
+          ? fetch(API + "/api/profile").then((r) => {
+              if (!r.ok) throw Error("Profile unavailable");
+              return r.json();
+            })
+          : null,
       ]);
       if (generation !== refreshGeneration.current) return;
+      if (profile) setPhoneReady(!profile.phoneRequired || profile.reviewed);
       if (sheetDraft.current === null)
         setSheetId(
           c.sheetId === "PASTE_GOOGLE_SHEET_ID_HERE" ? "" : c.sheetId || "",
@@ -306,7 +320,7 @@ function App() {
     } catch {
       if (generation !== refreshGeneration.current) return;
       setAuthError(
-        "Chưa đọc được trạng thái đăng nhập từ máy chủ. Bạn vẫn có thể dùng Cut Label; bấm thử lại để kết nối tài khoản.",
+        "Chưa đọc được trạng thái tài khoản từ máy chủ. Hãy kiểm tra kết nối và thử lại.",
       );
       setConfigMsg(
         "Không kết nối được máy chủ. Hãy kiểm tra kết nối hoặc khởi động lại tool.",
@@ -385,11 +399,36 @@ function App() {
     } else window.open("/api/auth/start", "_blank", "noopener,noreferrer");
   }
   async function logout() {
-    const response = await fetch("/api/logout", { method: "POST" });
-    if (response.ok) {
+    if (cutBusy || getBusy) return;
+    if (
+      jobs.length &&
+      !window.confirm(
+        "Đăng xuất sẽ xóa danh sách PDF đang mở. Hãy xuất file trước. Tiếp tục?",
+      )
+    )
+      return;
+    setLogoutError("");
+    try {
+      const response = await fetch("/api/logout", { method: "POST" });
+      if (!response.ok) throw Error("Logout failed");
       sheetDraft.current = null;
+      setJobs([]);
+      setReview(null);
+      setDownloadResult(null);
+      setImportErrors([]);
+      setExportErrors([]);
+      setCutMsg("");
+      for (const document of documents.current)
+        document.destroy().catch(() => {});
+      documents.current.clear();
+      setPage("get");
+      openAuth("login");
       await refresh();
-    } else setConfigMsg("Không đăng xuất được. Vui lòng thử lại.");
+    } catch {
+      setLogoutError(
+        "Không đăng xuất được. Vui lòng kiểm tra kết nối và thử lại.",
+      );
+    }
   }
   function reloadVersion() {
     if (cutBusy || getBusy) return;
@@ -690,15 +729,43 @@ function App() {
       setReview({ entries, batch });
     else runExport(entries, batch);
   }
-  if (authView && !PREVIEW_ONLY)
+  if (!PREVIEW_ONLY && !sessionReady)
+    return (
+      <div className="auth-shell">
+        <main className="auth-card" aria-busy={!authError}>
+          <h1>Poshmark Label Manager</h1>
+          <p role="status">{authError || "Đang kiểm tra phiên đăng nhập…"}</p>
+          {authError && <button onClick={refresh}>Thử lại kết nối</button>}
+        </main>
+      </div>
+    );
+  const requiredAuth = !PREVIEW_ONLY && webMode && !authenticated;
+  if ((authView || requiredAuth) && !PREVIEW_ONLY)
     return (
       <AuthPage
-        mode={authView}
+        mode={
+          authView === "verify-email" && requiredAuth
+            ? "login"
+            : authView || "login"
+        }
+        verificationPending={verifyPending.current}
         token={authToken.current}
         onNavigate={openAuth}
-        onBack={() => openAuth(null)}
+        onBack={!webMode || authenticated ? () => openAuth(null) : undefined}
+        backLabel={
+          webMode && !emailVerified ? "← Quay lại tài khoản" : undefined
+        }
         onAuth={authCompleted}
         onGoogle={connectGoogle}
+      />
+    );
+  if (!PREVIEW_ONLY && webMode && !emailVerified)
+    return (
+      <ActivationPage
+        key={authUser.current}
+        onLogout={logout}
+        onRefresh={refresh}
+        logoutError={logoutError}
       />
     );
   return (
@@ -718,6 +785,11 @@ function App() {
           </div>
         )}
       </header>
+      {logoutError && (
+        <p className="warning" role="alert">
+          {logoutError}
+        </p>
+      )}
       {authError && !PREVIEW_ONLY && (
         <aside className="warning" role="alert">
           <strong>Kết nối tài khoản chưa sẵn sàng</strong>
@@ -727,10 +799,13 @@ function App() {
           </button>
         </aside>
       )}
-      {webMode && authenticated && <AccountNotice key={authUser.current} />}
       {webMode && authenticated && (
         <div className="inlineActions">
-          <button className="secondary" onClick={logout} disabled={getBusy}>
+          <button
+            className="secondary"
+            onClick={logout}
+            disabled={getBusy || cutBusy}
+          >
             Đăng xuất
           </button>
         </div>
@@ -766,8 +841,29 @@ function App() {
         >
           ▣ Cut Label
         </button>
+        {webMode && authenticated && !PREVIEW_ONLY && (
+          <button
+            className={page === "profile" ? "active" : ""}
+            onClick={() => setPage("profile")}
+          >
+            Hồ sơ / Quản trị
+          </button>
+        )}
       </nav>
-      {page === "get" ? (
+      {page === "profile" && webMode && authenticated ? (
+        <main className="panel">
+          <div className="panelhead">
+            <div>
+              <h2>Hồ sơ tài khoản</h2>
+              <p>
+                Cập nhật số điện thoại. Quản trị viên quản lý thông tin người
+                dùng tại đây.
+              </p>
+            </div>
+          </div>
+          <PhoneManager key={authUser.current} onEligibility={setPhoneReady} />
+        </main>
+      ) : page === "get" ? (
         <main className="panel">
           <div className="panelhead">
             <div>
@@ -806,11 +902,16 @@ function App() {
             </section>
           ) : (
             <>
-              {webMode && authenticated && (
-                <PhoneManager
-                  key={authUser.current}
-                  onEligibility={setPhoneReady}
-                />
+              {webMode && !phoneReady && (
+                <aside className="warning">
+                  Cần kiểm tra thông tin điện thoại trước khi chạy Get Label.{" "}
+                  <button
+                    className="text-button"
+                    onClick={() => setPage("profile")}
+                  >
+                    Mở Hồ sơ
+                  </button>
+                </aside>
               )}
               <section className="configbox">
                 <h3>Google Sheets</h3>

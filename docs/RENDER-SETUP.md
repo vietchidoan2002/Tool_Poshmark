@@ -54,7 +54,7 @@ Khi Render cấp URL, ví dụ https://ten-web.onrender.com, thêm vào **Author
 
 Dùng đúng tên miền thật. Mặc định máy chủ lấy RENDER_EXTERNAL_HOSTNAME; nếu có custom domain thì đặt PUBLIC_BASE_URL bằng origin HTTPS của tên miền đó và đăng ký callback tương ứng.
 
-Mở **URL Web Service mới**, không dùng URL Static Site cũ. Trang Get Label sẽ có **Đăng nhập bằng Google** thay cho thông báo “sẽ được bổ sung sau”. Mỗi người đăng nhập tài khoản riêng và tự lưu Sheet ID. Không upload credentials.json hay token_*.json lên web.
+Mở **URL Web Service mới**, không dùng URL Static Site cũ. Trang đầu là **Đăng nhập**. Có form đăng ký email/mật khẩu/SĐT và tùy chọn **Tiếp tục với Google** cho tài khoản cũ. Tài khoản mới phải xác nhận email mới vào công cụ. Mỗi người đăng nhập tài khoản riêng và tự lưu Sheet ID. Không upload credentials.json hay token_*.json lên web.
 
 ## 5. Kiểm tra trước khi mời nhiều người
 
@@ -62,7 +62,7 @@ Mở **URL Web Service mới**, không dùng URL Static Site cũ. Trang Get Labe
 - Đăng nhập hai tài khoản Test users bằng hai trình duyệt; kiểm tra Sheet ID, Gmail và trạng thái đăng xuất không xuất hiện chéo.
 - Chạy Get Label chỉ trên dữ liệu được cho phép: ghi Sheets và đánh dấu email đã xử lý là đã đọc.
 - Kiểm tra sau khi Web Service/Neon ngủ rồi thức lại; kiểm tra dữ liệu còn sau redeploy.
-- Cut Label vẫn chạy trong trình duyệt, không cần đăng nhập và không tải vận đơn lên máy chủ.
+- Cut Label chạy trong trình duyệt sau khi đăng nhập và xác nhận email; không tải vận đơn lên máy chủ. Static Site xem thử vẫn dùng Cut Label không cần tài khoản.
 
 ## Giới hạn miễn phí
 
@@ -80,14 +80,15 @@ Kiểm thử tự động dùng Google giả lập và PostgreSQL trong bộ nh�
 
 Trong Environment của **Web Service** (không phải Static Site):
 
-- `ADMIN_EMAILS`: email Google đã xác minh của bạn; nếu có nhiều quản trị viên, phân cách bằng dấu phẩy. Không có danh sách này thì không ai được dùng API quản trị. Không cấp quyền bằng dữ liệu người dùng gửi lên.
-- `REQUIRE_REVIEWED_PHONE=true`: chặn Get Label đến khi người dùng có số được quản trị viên kiểm tra. Nếu bật mà thiếu ADMIN_EMAILS, máy chủ từ chối khởi động để tránh khóa toàn bộ người dùng mà không có người duyệt.
+- `ADMIN_EMAILS`: email tài khoản đã xác minh của bạn; nếu có nhiều quản trị viên, phân cách bằng dấu phẩy. Không có danh sách này thì không ai được dùng API quản trị. Không cấp quyền bằng dữ liệu người dùng gửi lên.
+- `REQUIRE_REVIEWED_PHONE=false` (mặc định mới): kích hoạt bằng email, thu số ngay khi đăng ký và kiểm tra thủ công sau. Với dịch vụ cũ đã đặt true, cần đổi thủ công trong Render Environment rồi deploy lại.
+- Tùy chọn `REQUIRE_REVIEWED_PHONE=true`: chặn Get Label đến khi người dùng có số được quản trị viên kiểm tra. Nếu bật mà thiếu ADMIN_EMAILS, máy chủ từ chối khởi động để tránh khóa toàn bộ người dùng mà không có người duyệt.
 
 Sau khi deploy:
 
 1. Đăng nhập bằng đúng email quản trị đã khai báo.
-2. Ở Get Label, mục **Số điện thoại tài khoản**, lưu số của bạn.
-3. Mở **Quản trị · số điện thoại người dùng** → **Tìm / tải danh sách**. Bạn có thể tìm email/số, thêm số vào tài khoản đã đăng nhập Google, sửa, xóa, đánh dấu đã kiểm tra hoặc bỏ đánh dấu. Có phân trang để không tải toàn bộ danh sách.
+2. Mở tab **Hồ sơ / Quản trị** → **Số điện thoại tài khoản**. Số đã nhập khi đăng ký sẽ có sẵn; tài khoản Google cũ có thể bổ sung số tại đây.
+3. Mở **Quản trị · số điện thoại người dùng** → **Tìm / tải danh sách**. Bạn có thể tìm email/số, thêm số vào tài khoản website hoặc Google, sửa, xóa, đánh dấu đã kiểm tra hoặc bỏ đánh dấu. Có phân trang để không tải toàn bộ danh sách.
 4. Khi bạn đã đối chiếu thủ công, chọn **Xác nhận đã kiểm tra thủ công**. Đổi số sẽ tự bỏ đánh dấu cũ. Xóa số cần xác nhận; nó không xóa tài khoản Google hay dữ liệu Sheets.
 5. Người dùng có thể nhập/chỉnh số của chính họ; không xem danh sách của người khác và không tự đánh dấu đã kiểm tra. Tải lại thông tin để nhận trạng thái mới.
 
@@ -95,7 +96,7 @@ Số Việt Nam được chuẩn hóa theo mã +84, số quốc tế cần mã +
 
 Nên sửa qua giao diện để áp dụng chuẩn hóa, kiểm tra trùng và nhật ký; sửa trực tiếp bằng SQL có thể bỏ qua các bước này. Chủ database vẫn có quyền truy cập toàn bộ dữ liệu, vì vậy không chia sẻ DATABASE_URL với người dùng thường.
 
-**Không có SMS OTP hay xác minh SIM chính chủ trong chức năng này.** Một số hợp định dạng vẫn có thể thuộc người khác hoặc không còn hoạt động. Nhãn hiển thị là “Đã kiểm tra thủ công”, không phải đã nhận SMS. Muốn chứng minh nhận được số cần tích hợp OTP riêng và kiểm tra chi phí nhà cung cấp. Cut Label vẫn dùng được không đăng nhập và không yêu cầu số điện thoại; cổng kiểm tra áp dụng cho Get Label ở Web Service.
+**Không có SMS OTP hay xác minh SIM chính chủ trong chức năng này.** Một số hợp định dạng vẫn có thể thuộc người khác hoặc không còn hoạt động. Nhãn hiển thị là “Đã kiểm tra thủ công”, không phải đã nhận SMS. Muốn chứng minh nhận được số cần tích hợp OTP riêng và kiểm tra chi phí nhà cung cấp. Web Service yêu cầu đăng nhập và xác nhận email cho cả hai công cụ. Cổng kiểm tra số thủ công, nếu chủ website bật, chỉ áp dụng cho Get Label.
 
 ## Trang đăng nhập/đăng ký riêng
 

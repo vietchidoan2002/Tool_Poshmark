@@ -17,7 +17,7 @@ services:
       - key: ADMIN_EMAILS
         sync: false
       - key: REQUIRE_REVIEWED_PHONE
-        value: "true"
+        value: "false"
       - key: PG_POOL_MAX
         value: "4"
       - key: DATABASE_URL

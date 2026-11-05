@@ -1,14 +1,20 @@
 # Đăng nhập/đăng ký email và mật khẩu
 
-Bản Web Service có các trang `/#/login`, `/#/register`, `/#/forgot`, `/#/reset-password` và `/#/verify-email`. Static Site xem thử vẫn chỉ có Cut Label, không có máy chủ để lưu mật khẩu.
+Mở URL gốc của Web Service sẽ hiện form đăng nhập. Phải đăng nhập và xác nhận email mới vào được Get Label, Cut Label và Hồ sơ. Bản Web Service có các trang `/#/login`, `/#/register`, `/#/forgot`, `/#/reset-password` và `/#/verify-email`. Static Site xem thử vẫn chỉ có Cut Label, không có máy chủ để lưu mật khẩu.
 
-- Đăng ký: tên hiển thị, email, mật khẩu 8–128 ký tự, xác nhận mật khẩu, đồng ý điều khoản. Tài khoản mới được tạo riêng với mật khẩu băm scrypt và salt ngẫu nhiên. Không gửi hoặc lưu mật khẩu dạng rõ.
+- Đăng ký: tên hiển thị, email, **số điện thoại bắt buộc**, mật khẩu 8–128 ký tự, xác nhận mật khẩu, đồng ý điều khoản. Tài khoản mới được tạo riêng với mật khẩu băm scrypt và salt ngẫu nhiên. Không gửi hoặc lưu mật khẩu dạng rõ. Số được kiểm tra định dạng, chuẩn hóa E.164 và chống trùng ở máy chủ; tài khoản và số được lưu trong cùng giao dịch. Đăng ký không tự đăng nhập: giao diện quay về form đăng nhập kèm thông báo kết quả gửi email.
 - Đăng nhập: email/mật khẩu, hiện/ẩn mật khẩu, trạng thái loading và ghi nhớ đăng nhập. Không chọn ghi nhớ: cookie theo phiên trình duyệt, phiên máy chủ tối đa 12 giờ. Có ghi nhớ: tối đa 30 ngày. Nên không chọn trên máy dùng chung.
-- Tài khoản mới cần xác nhận email trước khi kết nối Google hoặc nhận quyền quản trị. Không tự gộp tài khoản chưa xác nhận với một danh tính Google chỉ vì trùng email.
+- Tài khoản mới đăng nhập khi chưa xác nhận email sẽ chỉ thấy trang kích hoạt: gửi lại email, kiểm tra lại trạng thái hoặc đăng xuất. Chưa xác nhận thì API công cụ cũng từ chối yêu cầu. Không tự gộp tài khoản chưa xác nhận với một danh tính Google chỉ vì trùng email.
 - Google cũ vẫn đăng nhập được bằng tùy chọn Google. Người dùng email/mật khẩu xác nhận email rồi kết nối Google: token gắn với tài khoản website đang đăng nhập, không đổi danh tính website sang tài khoản Gmail được kết nối.
-- Quên mật khẩu gửi thông báo giống nhau cho email có/không có tài khoản và không chờ độ trễ gửi thư của nhà cung cấp. Tác vụ gửi chạy trong tiến trình máy chủ với hàng chờ nhỏ; restart/deploy giữa chừng có thể làm mất lần gửi đang chạy, lúc đó người dùng yêu cầu lại. Liên kết reset hết hạn sau 30 phút, xác nhận email sau 24 giờ, chỉ dùng một lần và chỉ lưu hash token. Token nằm trong fragment URL, được xóa khỏi thanh địa chỉ sau khi đọc; không gửi token trong query string cho máy chủ hoặc ghi log. Xác nhận email yêu cầu đăng nhập đúng tài khoản đăng ký; nếu cần, chọn Đăng nhập rồi quay lại xác nhận.
+- Quên mật khẩu gửi thông báo giống nhau cho email có/không có tài khoản và không chờ độ trễ gửi thư của nhà cung cấp. Tác vụ gửi chạy trong tiến trình máy chủ với hàng chờ nhỏ; restart/deploy giữa chừng có thể làm mất lần gửi đang chạy, lúc đó người dùng yêu cầu lại. Liên kết reset hết hạn sau 30 phút, xác nhận email sau 24 giờ, chỉ dùng một lần và chỉ lưu hash token. Token nằm trong fragment URL, được xóa khỏi thanh địa chỉ sau khi đọc; không gửi token trong query string cho máy chủ hoặc ghi log. Xác nhận email yêu cầu đăng nhập đúng tài khoản đăng ký; nếu chưa đăng nhập, giao diện yêu cầu đăng nhập và giữ liên kết trong bộ nhớ để tiếp tục xác nhận. Nếu liên kết hết hạn, quay lại tài khoản để gửi lại.
 - Reset mật khẩu vô hiệu hóa mọi phiên mật khẩu cũ. Tài khoản Google cũ có thể tạo mật khẩu bằng luồng khôi phục email; quyền kết nối Google/Sheet vẫn giữ nguyên. Luồng này được ghi nhận là legacy-google-reset, không giả lập đồng ý đăng ký mới.
 - Giới hạn thử đăng nhập/gửi mail theo IP, khóa tạm sau nhiều lần sai và ngân sách tối đa 50 lần gửi email/ngày UTC. Tài nguyên băm mật khẩu cũng được giới hạn đồng thời để tránh vượt RAM Free.
+
+## Số điện thoại và hồ sơ
+
+Số điện thoại được thu ngay trong form đăng ký. Sau khi đăng nhập và xác nhận email, mở **Hồ sơ / Quản trị** để sửa số; quản trị viên có thể tìm, sửa, xóa, kiểm tra số. Get Label chỉ hiển thị cấu hình Gmail/Sheets, không chen form điện thoại.
+
+Để kích hoạt bằng **email** và kiểm tra SĐT sau, đặt `REQUIRE_REVIEWED_PHONE=false` trong Render → Environment rồi deploy lại. Đổi blueprint không tự ghi đè biến đã nhập thủ công trong dịch vụ cũ. Đây cũng là mặc định của render.web.yaml mới. Nếu chủ website chủ động bật `true`, Get Label vẫn yêu cầu kiểm tra số thủ công; xác nhận email không thay thế bước đó. Không có SMS OTP và không xác minh SIM chính chủ.
 
 ## Gửi email bằng Gmail của quản trị viên
 
