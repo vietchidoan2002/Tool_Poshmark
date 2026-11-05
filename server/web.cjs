@@ -9,6 +9,10 @@ const path = require("node:path");
 const { google } = require("googleapis");
 const { createWebStore } = require("./web-store.cjs");
 const {
+  oauthDiagnostic,
+  oauthFailurePage,
+} = require("./oauth-diagnostics.cjs");
+const {
   configurationError,
   startupDiagnostic,
 } = require("./startup-diagnostics.cjs");
@@ -87,6 +91,10 @@ async function createWebApp(config, deps = {}) {
     next();
   });
   app.use(express.json({ limit: "32kb" }));
+  app.use(["/api/auth/start", "/oauth2callback"], (req, res, next) => {
+    req.oauthStage = "SESSION_SAVE";
+    next();
+  });
   app.use(
     ["/api", "/oauth2callback"],
     session({
@@ -149,6 +157,7 @@ async function createWebApp(config, deps = {}) {
     "/api/auth/start",
     loginLimit,
     asyncRoute(async (req, res) => {
+      req.oauthStage = "SESSION_SAVE";
       if (
         req.session.userId &&
         !(await passwordAuth.isVerified(req.session.userId))
@@ -191,6 +200,7 @@ async function createWebApp(config, deps = {}) {
     asyncRoute(async (req, res) => {
       const pending = req.session.oauth;
       delete req.session.oauth;
+      req.oauthStage = "SESSION_SAVE";
       await saveSession(req);
       if (
         !pending ||
@@ -208,11 +218,13 @@ async function createWebApp(config, deps = {}) {
           .status(400)
           .send("Bạn chưa cấp quyền Google. Quay lại ứng dụng để thử lại.");
       const auth = oauth();
+      req.oauthStage = "TOKEN_EXCHANGE";
       const { tokens } = await auth.getToken({
         code: req.query.code,
         codeVerifier: pending.codeVerifier,
         redirect_uri: base.origin + "/oauth2callback",
       });
+      req.oauthStage = "IDENTITY_VERIFY";
       if (!tokens.id_token) throw Error("Missing identity token");
       const scopes = String(tokens.scope || "").split(" ");
       if (
@@ -231,6 +243,7 @@ async function createWebApp(config, deps = {}) {
       const identity = ticket.getPayload();
       if (!identity?.sub || !identity.email || !identity.email_verified)
         throw Error("Unverified Google identity");
+      req.oauthStage = "ACCOUNT_SAVE";
       await passwordAuth.checkSession(req);
       if (pending.userId && req.session.userId !== pending.userId)
         return res
@@ -251,6 +264,7 @@ async function createWebApp(config, deps = {}) {
           "UPDATE pm_password_accounts SET email_verified=true WHERE user_id=$1",
           [ownerId],
         );
+      req.oauthStage = "SESSION_SAVE";
       if (pending.userId && account) {
         await passwordAuth.authenticate(
           req,
@@ -451,6 +465,19 @@ async function createWebApp(config, deps = {}) {
   app.use((error, req, res, next) => {
     if (config.testing && deps.onError) deps.onError(error);
     if (res.headersSent) return next(error);
+    if (req.path === "/oauth2callback" || req.path === "/api/auth/start") {
+      const diagnostic = oauthDiagnostic(error, req.oauthStage);
+      // A failed explicit session save must not be retried by res.end().
+      // Otherwise express-session forwards a second, raw storage error.
+      req.session = null;
+      console.error(
+        `[${diagnostic.code}${diagnostic.databaseCode ? ":" + diagnostic.databaseCode : ""}] ${diagnostic.message}`,
+      );
+      return res
+        .status(diagnostic.status)
+        .type("html")
+        .send(oauthFailurePage(diagnostic));
+    }
     res
       .status(500)
       .json({ error: "Máy chủ chưa xử lý được yêu cầu. Vui lòng thử lại." });

@@ -57,6 +57,23 @@ Nếu Google chưa cho cấp quyền, thêm Gmail gửi thư vào **Google Auth 
 | `AUTH_MAIL_RATE_LIMIT` / `AUTH_MAIL_DAILY_LIMIT` | Chờ hạn mức nhà cung cấp/website được cấp lại, không bấm gửi liên tục. |
 | `AUTH_MAIL_TIMEOUT` / `AUTH_MAIL_DELIVERY_FAILED` | Thử lại sau; gửi mã lỗi cho quản trị viên nếu vẫn lỗi. |
 
+### Tài khoản Google Cloud và Gmail quản trị khác nhau
+
+Hai tài khoản này có thể khác nhau. Tài khoản Google Cloud quản lý dự án/OAuth client; Gmail quản trị là tài khoản cấp quyền và gửi email. Với dự án ở Testing, thêm Gmail quản trị vào Test users. `ADMIN_EMAILS` và `AUTH_MAIL_SENDER_EMAIL` dùng Gmail quản trị, không bắt buộc dùng email sở hữu dự án Cloud. Riêng `GOOGLE_CLIENT_ID` và `GOOGLE_CLIENT_SECRET` phải lấy từ cùng OAuth Web client trong dự án đã cấu hình redirect URI; lưu chúng trực tiếp trong Render Environment, không gửi qua chat.
+
+Nếu Google đã quay về `/oauth2callback` nhưng máy chủ lỗi, bản mới hiện trang có nút quay lại đăng nhập và mã chẩn đoán cố định (cũng có trong Render Logs):
+
+| Mã | Cách xử lý |
+| --- | --- |
+| `OAUTH_CLIENT_CONFIG` | Đối chiếu ID/secret trong Render với cùng một OAuth Web client. |
+| `OAUTH_REDIRECT_URI` | Đối chiếu callback và PUBLIC_BASE_URL với tên miền đang dùng. |
+| `OAUTH_GRANT_EXPIRED` | Bắt đầu lại từ trang đăng nhập; không tải lại callback cũ. |
+| `OAUTH_GOOGLE_UNAVAILABLE` | Chờ rồi thử lại khi có kết nối Google. |
+| `OAUTH_IDENTITY_VERIFY` | Thử lại; chủ website kiểm tra OAuth client/kết nối xác minh Google. |
+| `OAUTH_ACCOUNT_SAVE` / `OAUTH_SESSION_SAVE` | Chủ website kiểm tra Neon/database; mã SQL được phép hiển thị giúp nhận biết thiếu bảng, thiếu quyền hoặc hết kết nối. |
+
+Thông báo/log không chứa authorization code, client secret, token, truy vấn SQL hay URL database. Không tắt xác minh danh tính/email của Google để vượt qua lỗi này. Kiểm thử tự động giả lập các lỗi ở từng bước; cần thử đăng nhập lại trên dịch vụ thật sau deploy để xác định nguyên nhân thực tế.
+
 Nếu Gmail quản trị chưa kết nối, đã ngắt kết nối, sai tài khoản gửi hoặc vượt quota, email có thể không đến; tài khoản mới vẫn ở trạng thái chưa xác nhận. Không đánh dấu email đã gửi/thành công chỉ dựa trên việc bấm nút. Email xuất hiện trong Sent của người gửi theo hành vi Gmail bình thường. Ứng dụng không gửi PDF hoặc nội dung đơn hàng trong email xác nhận.
 
 Nếu không có cấu hình gửi email, giao diện thông báo rõ. Quên mật khẩu trả lỗi chưa cấu hình, không giả vờ đã gửi. Tài khoản đăng ký mới sẽ cần chờ quản trị viên bật gửi mail rồi chọn **Gửi lại email xác nhận**.

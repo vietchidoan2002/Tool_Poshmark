@@ -90,7 +90,7 @@ async function fixture(t, runOrders, options = {}) {
   const { app, store } = await createWebApp(
     {
       pool,
-      sessionStore: new session.MemoryStore(),
+      sessionStore: options.sessionStore || new session.MemoryStore(),
       baseUrl: "http://localhost",
       testing: true,
       clientId: "test-client",
@@ -103,7 +103,7 @@ async function fixture(t, runOrders, options = {}) {
       mailSenderEmail: options.mailSenderEmail,
     },
     {
-      oauthFactory: provider,
+      oauthFactory: options.oauthFactory || provider,
       runOrders,
       ...(options.sendEmail ? { sendEmail: options.sendEmail } : {}),
       ...(options.gmailFactory ? { gmailFactory: options.gmailFactory } : {}),
@@ -1075,4 +1075,81 @@ test("admin Gmail bootstrap unlocks mail delivery without bypassing the password
   const session = await (await user("/api/session")).json();
   assert.equal(session.emailVerified, true);
   assert.equal(session.userId, passwordId);
+});
+
+test("OAuth callback explains failures at each stage without exposing codes, secrets or database details", async (t) => {
+  const logs = [];
+  t.mock.method(console, "error", (message) => logs.push(message));
+  const privateValue = "fake-private-code-secret-db-password";
+  for (const scenario of ["client", "identity", "database", "session"]) {
+    const memory = new session.MemoryStore();
+    const save = memory.set;
+    if (scenario === "session")
+      memory.set = function (id, data, done) {
+        if (data.userId)
+          return done(
+            Object.assign(new Error(privateValue), { code: "53300" }),
+          );
+        return save.call(this, id, data, done);
+      };
+    const { browser, store } = await fixture(t, undefined, {
+      sessionStore: memory,
+      oauthFactory: () => {
+        const auth = provider();
+        if (scenario === "client")
+          auth.getToken = async () => {
+            throw Object.assign(new Error(privateValue), {
+              response: {
+                data: {
+                  error: "invalid_client",
+                  error_description: privateValue,
+                },
+              },
+            });
+          };
+        if (scenario === "identity")
+          auth.verifyIdToken = async () => {
+            throw Error(privateValue);
+          };
+        return auth;
+      },
+    });
+    if (scenario === "database")
+      store.connect = async () => {
+        throw Object.assign(new Error(privateValue), {
+          code: "42501",
+          detail: privateValue,
+        });
+      };
+    const user = browser();
+    const start = await user("/api/auth/start");
+    const state = new URL(start.headers.get("location")).searchParams.get(
+      "state",
+    );
+    const callback = await user(
+      "/oauth2callback?state=" + state + "&code=" + privateValue,
+    );
+    const body = await callback.text();
+    const expected = {
+      client: "OAUTH_CLIENT_CONFIG",
+      identity: "OAUTH_IDENTITY_VERIFY",
+      database: "OAUTH_ACCOUNT_SAVE:42501",
+      session: "OAUTH_SESSION_SAVE:53300",
+    }[scenario];
+    assert.equal(callback.status, scenario === "identity" ? 502 : 503);
+    assert.match(callback.headers.get("content-type"), /text\/html/);
+    assert.ok(body.includes(expected));
+    assert.ok(body.includes("Quay lại đăng nhập"));
+    assert.ok(!body.includes(privateValue));
+    assert.equal(
+      (await (await user("/api/session")).json()).authenticated,
+      false,
+    );
+  }
+  assert.equal(logs.length, 4, JSON.stringify(logs.map(String)));
+  assert.ok(
+    logs.every(
+      (line) => line.startsWith("[OAUTH_") && !line.includes(privateValue),
+    ),
+  );
 });
