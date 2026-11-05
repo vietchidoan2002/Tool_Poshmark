@@ -8,6 +8,10 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { google } = require("googleapis");
 const { createWebStore } = require("./web-store.cjs");
+const {
+  configurationError,
+  startupDiagnostic,
+} = require("./startup-diagnostics.cjs");
 
 const asyncRoute = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
@@ -21,9 +25,14 @@ const rotateSession = (req) =>
   );
 
 async function createWebApp(config, deps = {}) {
-  const base = new URL(config.baseUrl);
+  let base;
+  try {
+    base = new URL(config.baseUrl);
+  } catch {
+    throw configurationError("CONFIG_PUBLIC_BASE_URL");
+  }
   if (base.protocol !== "https:" && !config.testing)
-    throw Error("PUBLIC_BASE_URL must use HTTPS");
+    throw configurationError("CONFIG_PUBLIC_BASE_URL");
   if (
     base.pathname !== "/" ||
     base.search ||
@@ -31,14 +40,22 @@ async function createWebApp(config, deps = {}) {
     base.username ||
     base.password
   )
-    throw Error("PUBLIC_BASE_URL must be an origin");
+    throw configurationError("CONFIG_PUBLIC_BASE_URL");
+  if (!config.clientId) throw configurationError("CONFIG_GOOGLE_CLIENT_ID");
+  if (!config.clientSecret)
+    throw configurationError("CONFIG_GOOGLE_CLIENT_SECRET");
   if (
-    !config.clientId ||
-    !config.clientSecret ||
-    !config.sessionSecret ||
+    typeof config.sessionSecret !== "string" ||
     config.sessionSecret.length < 32
   )
-    throw Error("Missing Google OAuth or session configuration");
+    throw configurationError("CONFIG_SESSION_SECRET");
+  if (
+    typeof config.encryptionKey !== "string" ||
+    config.encryptionKey.length < 32
+  )
+    throw configurationError("CONFIG_TOKEN_ENCRYPTION_KEY");
+  if (config.requirePhoneReview && !String(config.adminEmails || "").trim())
+    throw configurationError("CONFIG_ADMIN_EMAILS");
   const pool = config.pool;
   const store = await createWebStore(pool, config.encryptionKey);
   const app = express();
@@ -281,12 +298,10 @@ async function createWebApp(config, deps = {}) {
       if (config.requirePhoneReview) {
         const profile = await phones.get(req.session.userId);
         if (!profile?.phone || !profile.reviewed)
-          return res
-            .status(403)
-            .json({
-              error:
-                "Hãy lưu số điện thoại và chờ quản trị viên kiểm tra trước khi chạy Get Label.",
-            });
+          return res.status(403).json({
+            error:
+              "Hãy lưu số điện thoại và chờ quản trị viên kiểm tra trước khi chạy Get Label.",
+          });
       }
       const user = await store.get(req.session.userId);
       if (!user?.sheet_id || !user.tokens)
@@ -415,10 +430,8 @@ if (require.main === module) {
         console.log("Poshmark web server started"),
       );
     })
-    .catch(() => {
-      console.error(
-        "Web startup failed. Check database and required environment settings.",
-      );
+    .catch((error) => {
+      console.error(startupDiagnostic(error));
       pool.end();
       process.exitCode = 1;
     });
