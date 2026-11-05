@@ -11,7 +11,7 @@ Trong Render chọn **New → Static Site** (không chọn Web Service hoặc Po
 7. Kiểm tra đây là Static Site và Render không yêu cầu xác nhận dịch vụ trả phí. Chọn Deploy Static Site.
 8. Khi báo Live, mở địa chỉ HTTPS Render cấp. Mời người thử bằng cùng địa chỉ đó.
 
-Có thể dùng New → Blueprint với render.yaml mặc định; file này cũng chỉ chứa Static Site. `render.web.yaml` là cấu hình cho bản web đầy đủ có tài nguyên trả phí, không sử dụng trong giai đoạn xem thử này.
+Có thể dùng New → Blueprint với render.yaml mặc định; file này cũng chỉ chứa Static Site. `render.web.yaml` là cấu hình bản web đầy đủ dùng Render Free và Neon Free bên ngoài; cần cấu hình Google OAuth/database riêng theo RENDER-SETUP.md. Static Site này không tự bật Gmail.
 
 Bản thử có Cut Label thật, nhập PDF/OCR/đổi tên/xuất file trong trình duyệt. Không upload PDF lên máy chủ. Không kết nối Gmail/Sheets, không yêu cầu credentials/token. Giao diện ghi rõ giới hạn này. Chỉ bật Gmail sau khi triển khai máy chủ đăng nhập và cơ sở dữ liệu, đã cấu hình Google OAuth và kiểm tra tài khoản riêng trên dịch vụ thật.
 

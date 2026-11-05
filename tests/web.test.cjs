@@ -285,3 +285,29 @@ test("scope refresh persists, identity tokens are not stored, and the database l
   assert.ok(again);
   await again();
 });
+
+test("health probes do not wake a free database", async (t) => {
+  const { pool, browser } = await fixture(t);
+  let queries = 0;
+  const original = pool.query.bind(pool);
+  pool.query = (...args) => {
+    queries++;
+    return original(...args);
+  };
+  const client = browser();
+  assert.equal((await client("/healthz")).status, 200);
+  assert.equal(queries, 0);
+});
+test("import concurrency reserves database capacity for sessions and token writes", async (t) => {
+  const { store } = await fixture(t);
+  const first = await store.lock("A", "sheet-a"),
+    second = await store.lock("B", "sheet-b");
+  assert.ok(first);
+  assert.ok(second);
+  assert.equal(await store.lock("C", "sheet-c"), null);
+  await first();
+  const third = await store.lock("C", "sheet-c");
+  assert.ok(third);
+  await third();
+  await second();
+});

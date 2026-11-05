@@ -58,13 +58,8 @@ async function createWebApp(config, deps = {}) {
       crossOriginEmbedderPolicy: false,
     }),
   );
-  app.get(
-    "/healthz",
-    asyncRoute(async (req, res) => {
-      await pool.query("SELECT 1");
-      res.json({ ok: true });
-    }),
-  );
+  // A frequent Render health probe must not wake a sleeping Neon database.
+  app.get("/healthz", (req, res) => res.json({ ok: true }));
   app.get("/api/version", (req, res) => {
     res
       .set("Cache-Control", "no-store")
@@ -88,6 +83,7 @@ async function createWebApp(config, deps = {}) {
           pool,
           tableName: "pm_sessions",
           createTableIfMissing: true,
+          pruneSessionInterval: 86400, // Avoid waking a free database every 15 minutes.
         }),
       cookie: {
         httpOnly: true,
@@ -297,11 +293,10 @@ async function createWebApp(config, deps = {}) {
         return res.status(400).json({ error: "Thông tin chạy không hợp lệ." });
       const unlock = await store.lock(user.id, user.sheet_id);
       if (!unlock)
-        return res
-          .status(409)
-          .json({
-            error: "Tài khoản hoặc bảng tính này đang xử lý đơn. Vui lòng chờ.",
-          });
+        return res.status(409).json({
+          error:
+            "Máy chủ, tài khoản hoặc bảng tính đang xử lý đơn. Vui lòng chờ.",
+        });
       const logs = [];
       const refreshWrites = [];
       try {
@@ -325,15 +320,13 @@ async function createWebApp(config, deps = {}) {
         res.json({ ok: true, ...stats, output: logs.join("\n") });
       } catch (error) {
         await Promise.allSettled(refreshWrites);
-        res
-          .status(502)
-          .json({
-            ok: false,
-            error:
-              "Chưa hoàn tất. Có thể cần kết nối lại Google hoặc thử lại sau. Các dòng đã ghi vẫn được giữ.",
-            partialStats: error.partialStats || null,
-            output: logs.join("\n"),
-          });
+        res.status(502).json({
+          ok: false,
+          error:
+            "Chưa hoàn tất. Có thể cần kết nối lại Google hoặc thử lại sau. Các dòng đã ghi vẫn được giữ.",
+          partialStats: error.partialStats || null,
+          output: logs.join("\n"),
+        });
       } finally {
         await unlock();
       }
@@ -372,10 +365,19 @@ async function createWebApp(config, deps = {}) {
 
 if (require.main === module) {
   process.env.APP_MODE = "web";
-  const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 10,
-  });
+  const { databaseOptions } = require("./web-config.cjs");
+  let poolOptions;
+  try {
+    poolOptions = databaseOptions(
+      process.env.DATABASE_URL,
+      process.env.PG_POOL_MAX,
+    );
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+    return;
+  }
+  const pool = new Pool(poolOptions);
   pool.on("error", () =>
     console.error("Database connection lost; subsequent requests may retry."),
   );

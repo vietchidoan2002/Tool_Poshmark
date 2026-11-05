@@ -3,6 +3,8 @@ const crypto = require("node:crypto");
 async function createWebStore(pool, secret) {
   if (!secret || secret.length < 32)
     throw Error("TOKEN_ENCRYPTION_KEY must contain at least 32 characters");
+  let activeImports = 0;
+  const importLimit = Math.max(1, (pool.options?.max || 4) - 2);
   const key = crypto.createHash("sha256").update(secret).digest();
   const encrypt = (value, userId) => {
     const iv = crypto.randomBytes(12),
@@ -73,7 +75,13 @@ async function createWebStore(pool, secret) {
       );
     },
     async lock(userId, sheetId) {
-      const client = await pool.connect();
+      // Keep two connections available for sessions and token/config writes.
+      if (activeImports >= importLimit) return null;
+      activeImports++;
+      const client = await pool.connect().catch((error) => {
+        activeImports--;
+        throw error;
+      });
       const acquired = [];
       try {
         for (const name of ["pm-user:" + userId, "pm-sheet:" + sheetId]) {
@@ -86,6 +94,7 @@ async function createWebStore(pool, secret) {
               await client.query("SELECT pg_advisory_unlock(hashtext($1))", [
                 held,
               ]);
+            activeImports--;
             client.release();
             return null;
           }
@@ -101,10 +110,12 @@ async function createWebStore(pool, secret) {
           } catch (error) {
             failure = error;
           } finally {
+            activeImports--;
             client.release(failure);
           }
         };
       } catch (error) {
+        activeImports--;
         client.release(error);
         throw error;
       }

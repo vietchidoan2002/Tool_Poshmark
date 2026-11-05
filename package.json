@@ -13,7 +13,8 @@
     "test:browser": "node --test tests/browser/cut-label.cjs",
     "start:web": "node server/web.cjs",
     "build:preview": "node scripts/build-preview.mjs",
-    "test:preview": "node --test tests/browser/static-preview.cjs"
+    "test:preview": "node --test tests/browser/static-preview.cjs",
+    "build:web": "node scripts/build-web.mjs"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "1.0.0",

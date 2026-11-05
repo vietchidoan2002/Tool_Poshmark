@@ -1,39 +1,77 @@
-# Triển khai bản web xem thử trên Render
+# Gmail/Sheets trên gói miễn phí: Render Free + Neon Free
 
-Bản này nằm ở nhánh `preview/ui-single-pass-ocr`; không gộp vào `master`. Máy chủ web/API và PostgreSQL là dịch vụ có phí trong blueprint này: xem tổng phí Render hiển thị trước khi tạo. Tên miền riêng chưa bắt buộc. Không tải credentials.json/token cá nhân lên Render hoặc GitHub.
+Bản Static Site đang dùng không có API phía máy chủ, nên không thể bật Gmail chỉ bằng bỏ dòng thông báo. Tạo một Web Service gói **Free**, dùng PostgreSQL gói **Free** của Neon. Cấu hình nằm ở render.web.yaml trên nhánh preview/ui-single-pass-ocr; không đổi master. Không tạo Render PostgreSQL hoặc chọn plan trả phí.
 
-## 1. Tạo OAuth client dành cho website
+## 1. Tạo cơ sở dữ liệu Neon Free
 
-Trong Google Cloud Console, tạo/chọn project, bật Gmail API và Google Sheets API. Thiết lập Google Auth Platform/OAuth consent screen. Chọn External nếu người ngoài tổ chức cũng cần đăng nhập. Trong lúc Testing, thêm email của bạn và các người dùng thử vào Test users.
+- Đăng ký tại https://console.neon.tech, tạo project với plan **Free**.
+- Chọn region gần Render. Mở **Connect**, tắt **Connection pooling** và lấy connection string trực tiếp, không có `-pooler` trong hostname.
+- Chỉ dán chuỗi này vào **DATABASE_URL** trong Environment của Render. Đây là mật khẩu truy cập database, không gửi qua chat hay commit lên Git.
+- Ứng dụng dùng PostgreSQL session locks để tránh ghi trùng; transaction-pooler không phù hợp. Với Neon, mã máy chủ buộc `sslmode=verify-full`, không tắt xác minh chứng chỉ.
 
-Tạo OAuth client loại **Web application** (không dùng Desktop client của tool cũ). Lấy Client ID và Client secret; chỉ nhập chúng vào mục Environment trên Render. Có thể tạo client trước, bổ sung redirect URL sau khi Render cấp địa chỉ website.
+## 2. Tạo OAuth client cho web
 
-## 2. Tạo Blueprint
+- Vào https://console.cloud.google.com/, tạo/chọn project; bật **Gmail API** và **Google Sheets API**.
+- Trong Google Auth Platform/OAuth consent, chọn External nếu có người ngoài tổ chức. Để Testing trước và thêm email của từng người thử vào **Test users**.
+- Tạo OAuth client loại **Web application**, không dùng Desktop client cũ.
+- Lưu Client ID và Client secret trong Environment của Render bằng các tên bên dưới. Không gửi secret/token qua chat.
 
-Trong Render, chọn **New → Blueprint**, kết nối repository `vietchidoan2002/Tool_Poshmark` và chọn nhánh **preview/ui-single-pass-ocr**. Chỉ dùng file `render.web.yaml` cho giai đoạn web đầy đủ có trả phí; không dùng Blueprint mặc định vì `render.yaml` hiện dành cho Static Site xem thử. Có thể tạo Web Service và PostgreSQL thủ công theo file `render.web.yaml`. Kiểm tra plan và chi phí trước khi xác nhận tạo tài nguyên. Nếu tài khoản không hỗ trợ đúng tên plan trong YAML, chọn plan PostgreSQL bền vững có sẵn trong tài khoản, không dùng cơ sở dữ liệu tạm thời cho tài khoản thật.
+## 3. Tạo Render Web Service Free
 
-Nhập `GOOGLE_CLIENT_ID` và `GOOGLE_CLIENT_SECRET` khi Render hỏi. Database URL và hai khóa bí mật được Blueprint tạo/tham chiếu tự động. Giữ nguyên SESSION_SECRET và TOKEN_ENCRYPTION_KEY khi triển khai phiên bản sau. Mất/đổi khóa mã hóa sẽ khiến token cũ không đọc được. Không gửi các giá trị này qua chat.
+Chọn **New → Web Service**, kết nối repo vietchidoan2002/Tool_Poshmark. Đây là dịch vụ mới; Static Site cũ vẫn chỉ là Cut Label.
 
-Đợi deploy báo Live. Copy địa chỉ HTTPS Render cấp, ví dụ `https://ten-web.onrender.com`. Không thêm dấu / phía sau khi đặt PUBLIC_BASE_URL nếu cần override tên miền mặc định.
+| Mục | Giá trị |
+| --- | --- |
+| Branch | preview/ui-single-pass-ocr |
+| Runtime | Node |
+| Build Command | npm ci --include=dev && npm test && npm run build:web |
+| Start Command | npm run start:web |
+| Instance Type | Free |
+| Health Check Path | /healthz |
 
-## 3. Đăng ký callback Google
+Thêm Environment Variables:
 
-Quay lại OAuth client của Google, thêm **Authorized redirect URI**:
+| Tên | Nội dung |
+| --- | --- |
+| NODE_ENV | production |
+| APP_MODE | web |
+| PG_POOL_MAX | 4 |
+| DATABASE_URL | Connection string Neon trực tiếp |
+| GOOGLE_CLIENT_ID | OAuth Web Client ID |
+| GOOGLE_CLIENT_SECRET | OAuth Web Client secret |
+| SESSION_SECRET | Chuỗi ngẫu nhiên riêng, ít nhất 32 ký tự |
+| TOKEN_ENCRYPTION_KEY | Chuỗi ngẫu nhiên riêng khác, ít nhất 32 ký tự |
 
-`https://TEN-WEB-CUA-BAN.onrender.com/oauth2callback`
+Dùng nút tạo giá trị ngẫu nhiên nếu giao diện có. Có thể tạo tại máy của bạn bằng Node: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` — chạy hai lần, mỗi kết quả dùng cho một khóa. Không gửi kết quả qua chat. Giữ nguyên hai khóa này qua các lần deploy sau, nếu không sẽ mất phiên đăng nhập hoặc không đọc được token đã lưu.
 
-Thay phần tên bằng địa chỉ thật, không dùng ví dụ nguyên văn. Nếu dùng custom domain, đặt PUBLIC_BASE_URL trên Render bằng origin HTTPS đó và đăng ký callback tương ứng.
+Không đặt VITE_PREVIEW_ONLY=true cho Web Service. Script build:web cũng chủ động bỏ cờ xem thử. Khi Render hiển thị Instance Free và không yêu cầu chấp thuận dịch vụ trả phí, hãy tạo service.
 
-## 4. Kiểm tra trước khi mời nhiều người
+## 4. Callback Google
 
-Mở website, chọn Đăng nhập bằng Google. Mỗi tài khoản tự nhập Sheet ID; không phải upload JSON/token. Cut Label dùng được mà không đăng nhập và xử lý file ngay trong trình duyệt. Vận đơn không được gửi lên server.
+Khi Render cấp URL, ví dụ https://ten-web.onrender.com, thêm vào **Authorized redirect URIs** của OAuth Web client:
 
-Dùng hai trình duyệt/phiên riêng để đăng nhập hai người, xác nhận cấu hình và trạng thái Gmail không xuất hiện chéo. Chỉ chạy Get Label trên dữ liệu được cho phép; nó ghi Sheets và đánh dấu email đã xử lý là đã đọc. Kiểm tra logout, reconnect, restart và persistence trên Render sau triển khai. Các kiểm thử tự động dùng giả lập Google và PostgreSQL trong bộ nhớ, không thay thế kiểm tra Render/PostgreSQL thật hoặc luồng đăng nhập Google thật.
+`https://TEN-WEB-THAT.onrender.com/oauth2callback`
 
-Gmail modify là quyền Google hạn chế. Chế độ Testing có giới hạn người thử và vòng đời refresh token; để mở công khai cho nhiều người có thể cần Google xác minh ứng dụng và các yêu cầu bổ sung. Không hứa phát hành công khai chỉ bằng việc deploy lên Render.
+Dùng đúng tên miền thật. Mặc định máy chủ lấy RENDER_EXTERNAL_HOSTNAME; nếu có custom domain thì đặt PUBLIC_BASE_URL bằng origin HTTPS của tên miền đó và đăng ký callback tương ứng.
+
+Mở **URL Web Service mới**, không dùng URL Static Site cũ. Trang Get Label sẽ có **Đăng nhập bằng Google** thay cho thông báo “sẽ được bổ sung sau”. Mỗi người đăng nhập tài khoản riêng và tự lưu Sheet ID. Không upload credentials.json hay token_*.json lên web.
+
+## 5. Kiểm tra trước khi mời nhiều người
+
+- Kiểm tra /healthz trả ok và deploy báo Live.
+- Đăng nhập hai tài khoản Test users bằng hai trình duyệt; kiểm tra Sheet ID, Gmail và trạng thái đăng xuất không xuất hiện chéo.
+- Chạy Get Label chỉ trên dữ liệu được cho phép: ghi Sheets và đánh dấu email đã xử lý là đã đọc.
+- Kiểm tra sau khi Web Service/Neon ngủ rồi thức lại; kiểm tra dữ liệu còn sau redeploy.
+- Cut Label vẫn chạy trong trình duyệt, không cần đăng nhập và không tải vận đơn lên máy chủ.
+
+## Giới hạn miễn phí
+
+Không cấu hình tài nguyên trả phí hoặc tự nâng gói. Render Free/Neon Free có giới hạn và có thể ngủ, tạm dừng hoặc ngừng nhận thêm yêu cầu khi hết quota; lần truy cập đầu sau khi ngủ có thể chậm. Đọc chính sách hiện tại trong dashboard trước khi sử dụng, vì giới hạn/gói có thể thay đổi. Hết quota thì chờ hoặc giảm sử dụng, không tự chuyển sang trả phí.
+
+Gmail modify là quyền hạn chế của Google. Trong Testing, chỉ dùng các email Test users; token có thể cần kết nối lại định kỳ. Phát hành công khai có thể yêu cầu Google xét duyệt và đánh giá bổ sung, nên không thể cam kết một dịch vụ công khai không giới hạn sẽ luôn miễn phí. Không cần mua tên miền để thử bằng URL Render.
 
 ## Cập nhật về sau
 
-Render triển khai code mới từ nhánh được liên kết theo cài đặt auto-deploy của dịch vụ. Không đổi master hoặc nhánh deploy nếu chưa duyệt. Mỗi bản build nhúng commit ID; người dùng đang mở web được báo khi có phiên bản mới, rồi tự chọn tải lại sau khi đã xuất PDF. Không tự tải lại và làm mất file đang mở.
+Bật Auto-Deploy của Web Service trên nhánh đã chọn nếu muốn nhận bản sửa sau khi push lên nhánh đó. Không tự gộp master. Người dùng đang mở web được báo phiên bản mới rồi tự tải lại sau khi xuất các label, không phải tải/cài lại phần mềm. Không xóa Neon hoặc thay khóa mã hóa khi cập nhật.
 
-Triển khai lại không được xóa cơ sở dữ liệu hoặc đổi khóa. Người dùng vào cùng địa chỉ web, không cần tải/cài tool lại. Khi duyệt bản web xong, mới quyết định nhánh dùng cho production.
+Kiểm thử tự động dùng Google giả lập và PostgreSQL trong bộ nhớ. Chúng không chứng minh kết nối Neon, đăng nhập Google, quota hay việc phục hồi sau khi Render ngủ trong dịch vụ thật. Chỉ đánh dấu triển khai hoàn tất sau khi kiểm tra những bước trên với tài khoản/cấu hình thật.
