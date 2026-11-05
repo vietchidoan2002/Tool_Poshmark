@@ -47,6 +47,7 @@ export function extractOrderId(text, { ocr = false } = {}) {
   // Keep candidates next to an Order marker. Never remove arbitrary text and
   // accidentally join unrelated fields into a plausible 24-character ID.
   const markers = /\bOrder\s*(?:#|Number\s*:?|ID\s*:?)/gi;
+  const candidates = new Set();
   for (const marker of raw.matchAll(markers)) {
     const tail = raw.slice(marker.index + marker[0].length);
     const alphabet = ocr ? "a-fA-F0-9oOiIlL|!¢©®" : "a-fA-F0-9";
@@ -62,9 +63,9 @@ export function extractOrderId(text, { ocr = false } = {}) {
         .replace(/o/g, "0")
         .replace(/[il|!]/g, "1")
         .replace(/[¢©®]/g, "c");
-    if (/^[a-f0-9]{24}$/.test(id)) return id;
+    if (/^[a-f0-9]{24}$/.test(id)) candidates.add(id);
   }
-  return "";
+  return candidates.size === 1 ? [...candidates][0] : "";
 }
 
 export function extractUspsTracking(text) {
@@ -148,78 +149,39 @@ export async function recognizeLabel(
         user_defined_dpi: "300",
       }),
     );
-    const readings = [];
-    const failures = [];
-    for (const mode of ["3", "11"]) {
-      try {
-        if (expired) break;
-        if (mode === "11")
-          await withinDeadline(
-            worker.setParameters({ tessedit_pageseg_mode: mode }),
-          );
-        const { data } = await withinDeadline(
-          worker.recognize(canvas, {}, { text: true, blocks: true }),
-        );
-        const text = data?.text || "";
-        const id = extractOrderId(text, { ocr: true });
-        const words = (data?.blocks || []).flatMap((block) =>
-          (block.paragraphs || []).flatMap((paragraph) =>
-            (paragraph.lines || []).flatMap((line) => line.words || []),
-          ),
-        );
-        const idWords = words.filter((word) => {
-          const part = String(word.text || "")
-            .replace(/\s/g, "")
-            .toLowerCase()
-            .replace(/o/g, "0")
-            .replace(/[il|!]/g, "1")
-            .replace(/[¢©®]/g, "c");
-          return part.length >= 4 && id.includes(part);
-        });
-        const confidence = idWords.length
-          ? Math.min(...idWords.map((word) => Number(word.confidence) || 0))
-          : 0;
-        readings.push({
-          text,
-          id,
-          confidence,
-          tracking: extractUspsTracking(text),
-        });
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    if (!readings.length) throw failures[0] || new Error("Không đọc được OCR.");
-    const candidates = readings.filter((x) => x.id);
-    const conflicting = new Set(candidates.map((x) => x.id)).size > 1;
-    const reliable = candidates.find((x) => x.confidence >= 70);
-    const selected =
-      reliable || candidates[0] || readings.find((x) => x.text) || readings[0];
-    const trackingCandidates = new Set(
-      readings.map((x) => x.tracking).filter(Boolean),
+    // A single automatic-layout pass per page. Do not silently repeat OCR.
+    const { data } = await withinDeadline(
+      worker.recognize(canvas, {}, { text: true, blocks: true }),
     );
-    const warnings = [];
-    if (conflicting)
-      warnings.push(
-        "Các lượt OCR cho ID khác nhau. Hãy đối chiếu label và nhập lại ID.",
-      );
-    else if (candidates.length && !reliable)
-      warnings.push(
-        "OCR có độ tin cậy thấp. Hãy đối chiếu text và nhập Order ID thủ công.",
-      );
-    if (trackingCandidates.size > 1)
-      warnings.push(
-        "Các lượt OCR cho tracking khác nhau. Hãy xem lại mã dưới barcode.",
-      );
-    if (failures.length)
-      warnings.push(
-        "Một lượt OCR bị lỗi. Kết quả còn lại cần đối chiếu với label.",
-      );
+    const text = data?.text || "";
+    const id = extractOrderId(text, { ocr: true });
+    const words = (data?.blocks || []).flatMap((block) =>
+      (block.paragraphs || []).flatMap((paragraph) =>
+        (paragraph.lines || []).flatMap((line) => line.words || []),
+      ),
+    );
+    const idWords = words.filter((word) => {
+      const part = String(word.text || "")
+        .replace(/\s/g, "")
+        .toLowerCase()
+        .replace(/o/g, "0")
+        .replace(/[il|!]/g, "1")
+        .replace(/[¢©®]/g, "c");
+      return part.length >= 4 && id.includes(part);
+    });
+    const confidence = idWords.length
+      ? Math.min(...idWords.map((word) => Number(word.confidence) || 0))
+      : 0;
+    const reliable = id && confidence >= 70;
     return {
-      tracking: trackingCandidates.size === 1 ? [...trackingCandidates][0] : "",
-      text: selected.text,
-      orderId: !conflicting && reliable ? reliable.id : "",
-      warning: warnings.join(" "),
+      text,
+      tracking: extractUspsTracking(text),
+      orderId: reliable ? id : "",
+      warning: reliable
+        ? ""
+        : id
+          ? "OCR có độ tin cậy thấp. Đối chiếu label và nhập tên file trước khi xuất."
+          : "Chưa đọc được Order ID. Xem label gốc và nhập tên file trước khi xuất.",
     };
   } finally {
     if (worker) await worker.terminate();
