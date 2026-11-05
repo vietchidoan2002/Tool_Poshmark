@@ -20,7 +20,12 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '1mb' }));
 
 function readConfig() {
-  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); }
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    // Migrate the old example placeholder without changing a real saved ID.
+    if (config.sheetId === 'PASTE_GOOGLE_SHEET_ID_HERE') config.sheetId = '';
+    return config;
+  }
   catch { return { sheetId: '' }; }
 }
 function writeConfig(config) {

@@ -83,7 +83,7 @@ async function open(t, options = {}) {
       if (url.pathname.startsWith("/api/"))
         return route.fulfill({
           json: url.pathname.endsWith("/config")
-            ? { sheetId: "" }
+            ? { sheetId: options.sheetId ?? "" }
             : { credentialsPresent: false, accounts: [] },
         });
       if (
@@ -451,4 +451,49 @@ test("upload is keyboard-focusable and missing tracking is clearly shown", async
     "Chưa đọc được mã tracking",
   );
   assert.equal(await page.getByRole("alert").isVisible(), true);
+});
+
+test("Spreadsheet ID starts empty with hidden help; saved IDs persist", async (t) => {
+  for (const stored of ["", "PASTE_GOOGLE_SHEET_ID_HERE", ID]) {
+    const page = await open(t, { sheetId: stored });
+    await page.getByRole("button", { name: /Get Label/ }).click();
+    await page
+      .getByRole("button", { name: "Cập nhật tài khoản Gmail" })
+      .click();
+    await page.waitForFunction(
+      (expected) =>
+        document.querySelector(".configbox input")?.value === expected,
+      stored === ID ? ID : "",
+    );
+    const input = page.getByLabel("Spreadsheet ID", { exact: true });
+    assert.equal(await input.inputValue(), stored === ID ? ID : "");
+    assert.equal(await input.getAttribute("placeholder"), "");
+    assert.equal(
+      await page.locator("#sheet-id-help").getAttribute("open"),
+      null,
+    );
+    await page.getByText("Cách lấy Spreadsheet ID", { exact: true }).click();
+    assert.equal(await page.locator("#sheet-id-help").getAttribute("open"), "");
+    assert.equal(
+      await page.getByRole("button", { name: "Làm mới trạng thái" }).count(),
+      0,
+    );
+  }
+});
+
+test("refreshing Gmail does not overwrite an unsaved Sheet ID", async (t) => {
+  const page = await open(t, { sheetId: ID });
+  await page.getByRole("button", { name: /Get Label/ }).click();
+  await page
+    .getByLabel("Spreadsheet ID", { exact: true })
+    .fill("unsaved-sheet-id");
+  const response = page.waitForResponse((r) =>
+    r.url().endsWith("/api/gmail/status"),
+  );
+  await page.getByRole("button", { name: "Cập nhật tài khoản Gmail" }).click();
+  await response;
+  assert.equal(
+    await page.getByLabel("Spreadsheet ID", { exact: true }).inputValue(),
+    "unsaved-sheet-id",
+  );
 });

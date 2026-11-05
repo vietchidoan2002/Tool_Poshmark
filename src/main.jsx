@@ -26,7 +26,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
 let sharedPdfWorker;
 const getPdfWorker = () => (sharedPdfWorker ||= new pdfjsLib.PDFWorker());
-const API = "http://127.0.0.1:3210";
+const API = ""; // Same-origin API; Vite proxies local development requests.
 
 async function renderPage(page, scale = 3) {
   const base = page.getViewport({ scale: 1 });
@@ -156,6 +156,7 @@ function ExportReview({ review, onCancel, onConfirm }) {
 function App() {
   const [page, setPage] = useState("get");
   const [sheetId, setSheetId] = useState("");
+  const sheetDraft = useRef(null);
   const [accountName, setAccountName] = useState("");
   const [sheetName, setSheetName] = useState(
     () => localStorage.getItem("pm_default_sheet_name") || "",
@@ -196,7 +197,10 @@ function App() {
         fetch(API + "/api/config").then((r) => r.json()),
         fetch(API + "/api/gmail/status").then((r) => r.json()),
       ]);
-      setSheetId(c.sheetId || "");
+      if (sheetDraft.current === null)
+        setSheetId(
+          c.sheetId === "PASTE_GOOGLE_SHEET_ID_HERE" ? "" : c.sheetId || "",
+        );
       setGmail(g);
       setTokenFile((current) =>
         current && g.accounts?.some((account) => account.file === current)
@@ -205,7 +209,7 @@ function App() {
       );
     } catch {
       setConfigMsg(
-        "Không kết nối được backend. Hãy chạy Start Poshmark Label Manager.bat.",
+        "Không kết nối được máy chủ. Hãy kiểm tra kết nối hoặc khởi động lại tool.",
       );
     }
   }
@@ -253,6 +257,7 @@ function App() {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error);
+      if (sheetDraft.current === sheetId) sheetDraft.current = null;
       setConfigMsg("Đã lưu Google Sheets ID.");
     } catch (e) {
       setConfigMsg(e.message);
@@ -538,9 +543,6 @@ function App() {
           <h1>Poshmark Label Manager</h1>
           <p>Đơn hàng gọn gàng. Label sẵn sàng.</p>
         </div>
-        <button className="ghost refresh" onClick={refresh}>
-          Làm mới trạng thái
-        </button>
       </header>
       <nav className="tabs">
         <button
@@ -574,10 +576,21 @@ function App() {
               Spreadsheet ID
               <input
                 value={sheetId}
-                onChange={(e) => setSheetId(e.target.value)}
-                placeholder="Dán ID nằm giữa /d/ và /edit trong URL"
+                onChange={(e) => {
+                  sheetDraft.current = e.target.value;
+                  setSheetId(e.target.value);
+                }}
+                placeholder=""
+                aria-describedby="sheet-id-help"
               />
             </label>
+            <details id="sheet-id-help" className="hint">
+              <summary>Cách lấy Spreadsheet ID</summary>
+              <p>
+                Mở Google Sheets, sao chép phần nằm giữa /d/ và /edit trong địa
+                chỉ, rồi dán vào ô trên.
+              </p>
+            </details>
             <div className="inlineActions">
               <button className="secondary" onClick={saveConfig}>
                 Lưu Sheet ID
@@ -635,8 +648,12 @@ function App() {
               >
                 Kết nối / làm mới Gmail
               </button>
-              <button className="secondary" onClick={refresh}>
-                Kiểm tra token
+              <button
+                className="secondary"
+                onClick={refresh}
+                title="Đọc lại tài khoản Gmail đã kết nối, không cập nhật phiên bản phần mềm"
+              >
+                Cập nhật tài khoản Gmail
               </button>
             </div>
             <p className="hint">
