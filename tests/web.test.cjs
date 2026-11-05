@@ -77,7 +77,7 @@ function provider() {
   };
   return auth;
 }
-async function fixture(t, runOrders) {
+async function fixture(t, runOrders, options = {}) {
   const pool = database();
   const { app, store } = await createWebApp(
     {
@@ -89,6 +89,8 @@ async function fixture(t, runOrders) {
       clientSecret: "test-secret",
       sessionSecret: secret,
       encryptionKey: secret,
+      adminEmails: options.adminEmails,
+      requirePhoneReview: options.requirePhoneReview,
     },
     { oauthFactory: provider, runOrders },
   );
@@ -310,4 +312,152 @@ test("import concurrency reserves database capacity for sessions and token write
   assert.ok(third);
   await third();
   await second();
+});
+
+test("phone format, ownership boundaries, duplicates, admin CRUD and stale edits", async (t) => {
+  const { browser, login, pool } = await fixture(t, undefined, {
+    adminEmails: "A@example.test",
+  });
+  const admin = browser(),
+    user = browser();
+  await login(admin, "A");
+  await login(user, "B");
+  assert.equal((await user("/api/admin/phones")).status, 403);
+  assert.equal((await admin("/api/profile")).status, 200);
+  const invalid = await user("/api/profile/phone", {
+    method: "PUT",
+    body: { phone: "abc 123", version: 0 },
+  });
+  assert.equal(invalid.status, 400);
+  let result = await user("/api/profile/phone", {
+    method: "PUT",
+    body: { phone: "0901 234 567", version: 0, reviewed: true, userId: "A" },
+  });
+  assert.equal(result.status, 200);
+  let saved = await result.json();
+  assert.equal(saved.phone, "+84901234567");
+  assert.equal(saved.reviewed, false);
+  assert.equal((await (await admin("/api/profile")).json()).phone, "");
+  assert.equal(
+    (
+      await admin("/api/profile/phone", {
+        method: "PUT",
+        body: { phone: "+84901234567", version: 0 },
+      })
+    ).status,
+    409,
+  );
+  assert.equal(
+    (
+      await user("/api/admin/phones/A", {
+        method: "PUT",
+        body: { phone: "0901234567", version: 0 },
+      })
+    ).status,
+    403,
+  );
+  const list = await (
+    await admin("/api/admin/phones?search=B%40example.test")
+  ).json();
+  assert.equal(list.users.length, 1);
+  assert.equal(list.users[0].email, "B@example.test");
+  assert.equal(list.users[0].tokens, undefined);
+  assert.equal(
+    (
+      await admin("/api/admin/phones/B/review", {
+        method: "POST",
+        body: { version: saved.version },
+      })
+    ).status,
+    400,
+  );
+  result = await admin("/api/admin/phones/B/review", {
+    method: "POST",
+    body: { version: saved.version, reviewed: true },
+  });
+  assert.equal(result.status, 200);
+  let reviewed = await result.json();
+  assert.equal(reviewed.verificationMethod, "manual");
+  const same = await user("/api/profile/phone", {
+    method: "PUT",
+    body: { phone: "0901234567", version: reviewed.version },
+  });
+  assert.equal(same.status, 200);
+  assert.equal((await same.json()).reviewed, true);
+  assert.equal(
+    (
+      await user("/api/profile/phone", {
+        method: "PUT",
+        body: { phone: "0902345678", version: saved.version },
+      })
+    ).status,
+    409,
+  );
+  result = await admin("/api/admin/phones/B", {
+    method: "PUT",
+    body: { phone: "0902345678", version: reviewed.version },
+  });
+  assert.equal(result.status, 200);
+  let edited = await result.json();
+  assert.equal(edited.reviewed, false);
+  assert.equal(edited.phone, "+84902345678");
+  result = await admin("/api/admin/phones/B", {
+    method: "DELETE",
+    body: { version: edited.version },
+  });
+  assert.equal(result.status, 200);
+  assert.equal((await (await user("/api/profile")).json()).phone, "");
+  const audit = (await pool.query("SELECT * FROM pm_phone_audit")).rows;
+  assert.ok(audit.length >= 4);
+  assert.ok(!JSON.stringify(audit).includes("+8490"));
+  assert.equal((await admin("/api/admin/phones?offset=-1")).status, 400);
+  assert.equal((await admin("/api/admin/phones?limit=101")).status, 400);
+});
+
+test("phone review gate is enforced on server and cannot be self-approved", async (t) => {
+  let runs = 0;
+  const { browser, login } = await fixture(
+    t,
+    async () => {
+      runs++;
+      return { writtenCount: 0, skippedCount: 0 };
+    },
+    { adminEmails: "A@example.test", requirePhoneReview: true },
+  );
+  const admin = browser(),
+    user = browser();
+  await login(admin, "A");
+  await login(user, "B");
+  await user("/api/config", {
+    method: "POST",
+    body: { sheetId: "b".repeat(24) },
+  });
+  const body = {
+    accountName: "Test",
+    sheetName: "Orders",
+    tokenFile: "personal",
+  };
+  assert.equal(
+    (await user("/api/get-label/run", { method: "POST", body })).status,
+    403,
+  );
+  const profile = await (
+    await user("/api/profile/phone", {
+      method: "PUT",
+      body: { phone: "0901234567", version: 0, reviewed: true },
+    })
+  ).json();
+  assert.equal(
+    (await user("/api/get-label/run", { method: "POST", body })).status,
+    403,
+  );
+  await admin("/api/admin/phones/B/review", {
+    method: "POST",
+    body: { version: profile.version, reviewed: true },
+  });
+  assert.equal(
+    (await user("/api/get-label/run", { method: "POST", body })).status,
+    200,
+  );
+  assert.equal(runs, 1);
 });

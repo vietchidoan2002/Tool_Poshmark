@@ -212,6 +212,8 @@ async function createWebApp(config, deps = {}) {
       return res.status(403).json({ error: "Nguồn yêu cầu không hợp lệ." });
     next();
   });
+  const { mountPhones } = require("./phones.cjs");
+  const phones = await mountPhones(app, pool, store, config);
   app.post(
     "/api/logout",
     asyncRoute(async (req, res) => {
@@ -276,6 +278,16 @@ async function createWebApp(config, deps = {}) {
   app.post(
     "/api/get-label/run",
     asyncRoute(async (req, res) => {
+      if (config.requirePhoneReview) {
+        const profile = await phones.get(req.session.userId);
+        if (!profile?.phone || !profile.reviewed)
+          return res
+            .status(403)
+            .json({
+              error:
+                "Hãy lưu số điện thoại và chờ quản trị viên kiểm tra trước khi chạy Get Label.",
+            });
+      }
       const user = await store.get(req.session.userId);
       if (!user?.sheet_id || !user.tokens)
         return res
@@ -390,6 +402,8 @@ if (require.main === module) {
   createWebApp({
     pool,
     baseUrl,
+    adminEmails: process.env.ADMIN_EMAILS,
+    requirePhoneReview: process.env.REQUIRE_REVIEWED_PHONE === "true",
     clientId: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     sessionSecret: process.env.SESSION_SECRET,

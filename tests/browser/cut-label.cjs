@@ -88,6 +88,42 @@ async function open(t, options = {}) {
             userId: options.signedIn ? "test-user" : null,
           },
         });
+      if (url.pathname === "/api/profile" && options.webMode)
+        return route.fulfill({
+          json: options.phoneProfile || {
+            phone: "",
+            version: 0,
+            reviewed: false,
+            isAdmin: false,
+            phoneRequired: false,
+          },
+        });
+      if (url.pathname === "/api/profile/phone" && options.phoneProfile) {
+        const body = route.request().postDataJSON();
+        options.phoneProfile = {
+          ...options.phoneProfile,
+          phone: "+84901234567",
+          version: options.phoneProfile.version + 1,
+          reviewed: false,
+        };
+        return route.fulfill({ json: options.phoneProfile });
+      }
+      if (url.pathname === "/api/admin/phones" && options.phoneUsers)
+        return route.fulfill({
+          json: { users: options.phoneUsers, hasMore: false },
+        });
+      if (url.pathname.startsWith("/api/admin/phones/") && options.phoneUsers) {
+        const id = url.pathname.split("/")[4];
+        const user = options.phoneUsers.find((user) => user.id === id);
+        const body = route.request().postDataJSON();
+        if (url.pathname.endsWith("/review")) user.reviewed = body.reviewed;
+        else {
+          user.phone = route.request().method() === "DELETE" ? "" : body.phone;
+          user.reviewed = false;
+        }
+        user.version++;
+        return route.fulfill({ json: user });
+      }
       if (url.pathname === "/api/version" && options.newVersion)
         return route.fulfill({ json: { version: "test-new-version" } });
       if (url.pathname.startsWith("/api/"))
@@ -535,4 +571,84 @@ test("version notice never reloads a page containing unexported labels", async (
   page.once("dialog", (dialog) => dialog.dismiss());
   await page.getByRole("button", { name: "Tải phiên bản mới" }).click();
   assert.equal(await page.locator(".page").count(), 1);
+});
+
+test("signed-in users can save a phone without claiming SMS or SIM verification", async (t) => {
+  const page = await open(t, {
+    webMode: true,
+    signedIn: true,
+    phoneProfile: {
+      phone: "",
+      version: 0,
+      reviewed: false,
+      isAdmin: false,
+      phoneRequired: true,
+    },
+  });
+  await page.getByRole("button", { name: /Get Label/ }).click();
+  await page
+    .getByLabel("Số điện thoại của bạn", { exact: true })
+    .fill("0901 234 567");
+  await page
+    .getByRole("button", { name: "Lưu số điện thoại", exact: true })
+    .click();
+  await page.waitForFunction(
+    () => document.querySelector("input[type=tel]")?.value === "+84901234567",
+  );
+  assert.equal(
+    await page.getByText("Chưa kiểm tra", { exact: true }).isVisible(),
+    true,
+  );
+  assert.equal(
+    await page
+      .getByText("Quản trị · số điện thoại người dùng", { exact: true })
+      .count(),
+    0,
+  );
+});
+
+test("phone admin can list, edit, review and cancel or confirm deletion", async (t) => {
+  const users = [
+    {
+      id: "B",
+      email: "b@example.test",
+      phone: "+84901234567",
+      version: 1,
+      reviewed: false,
+    },
+  ];
+  const page = await open(t, {
+    webMode: true,
+    signedIn: true,
+    phoneProfile: {
+      phone: "",
+      version: 0,
+      reviewed: false,
+      isAdmin: true,
+      phoneRequired: true,
+    },
+    phoneUsers: users,
+  });
+  await page.getByRole("button", { name: /Get Label/ }).click();
+  await page
+    .getByText("Quản trị · số điện thoại người dùng", { exact: true })
+    .click();
+  await page.getByRole("button", { name: "Tìm / tải danh sách" }).click();
+  const input = page.getByLabel("Số điện thoại · b@example.test", {
+    exact: true,
+  });
+  await input.fill("+84902345678");
+  await page.getByRole("button", { name: "Lưu số", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Xác nhận đã kiểm tra thủ công" })
+    .click();
+  await page.getByRole("button", { name: "Bỏ đánh dấu kiểm tra" }).waitFor();
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "Xóa số", exact: true }).click();
+  assert.equal(await input.inputValue(), "+84902345678");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Xóa số", exact: true }).click();
+  await page.waitForFunction(
+    () => document.querySelector(".phone-account input")?.value === "",
+  );
 });

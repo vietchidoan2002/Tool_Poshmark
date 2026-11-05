@@ -693,3 +693,4 @@ footer {
     padding: 22px 12px;
   }
 }
+.phone-manager{border-top:4px solid #7552dd}.phone-account{padding:16px;margin-top:14px;border:1px solid #dce3f0;border-radius:12px;background:#fff}.phone-account>b{display:block;overflow-wrap:anywhere;margin-bottom:8px}.phone-account small{display:block;margin-top:10px;color:#526078}.phone-admin{margin-top:18px}.phone-admin>summary{font-weight:700;color:#5030a5}.phone-admin form .field{flex:1;min-width:180px}

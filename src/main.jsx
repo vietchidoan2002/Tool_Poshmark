@@ -5,6 +5,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createWorker } from "tesseract.js";
 import "./style.css";
+import PhoneManager from "./PhoneManager.jsx";
 import {
   extractOrderId,
   extractUspsTracking,
@@ -158,6 +159,7 @@ function App() {
   const [page, setPage] = useState(PREVIEW_ONLY ? "cut" : "get");
   const [webMode, setWebMode] = useState(PREVIEW_ONLY);
   const [authenticated, setAuthenticated] = useState(false);
+  const [phoneReady, setPhoneReady] = useState(true);
   const authUser = useRef(null);
   const refreshGeneration = useRef(0);
   const [updateAvailable, setUpdateAvailable] = useState(false);
@@ -698,6 +700,12 @@ function App() {
             </section>
           ) : (
             <>
+              {webMode && authenticated && (
+                <PhoneManager
+                  key={authUser.current}
+                  onEligibility={setPhoneReady}
+                />
+              )}
               <section className="configbox">
                 <h3>Google Sheets</h3>
                 <label className="field">
@@ -840,6 +848,7 @@ function App() {
                 <button
                   disabled={
                     getBusy ||
+                    (webMode && !phoneReady) ||
                     !sheetId ||
                     !gmail.accounts?.length ||
                     !accountName.trim() ||

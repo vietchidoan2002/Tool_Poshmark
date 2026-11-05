@@ -75,3 +75,24 @@ Gmail modify là quyền hạn chế của Google. Trong Testing, chỉ dùng c�
 Bật Auto-Deploy của Web Service trên nhánh đã chọn nếu muốn nhận bản sửa sau khi push lên nhánh đó. Không tự gộp master. Người dùng đang mở web được báo phiên bản mới rồi tự tải lại sau khi xuất các label, không phải tải/cài lại phần mềm. Không xóa Neon hoặc thay khóa mã hóa khi cập nhật.
 
 Kiểm thử tự động dùng Google giả lập và PostgreSQL trong bộ nhớ. Chúng không chứng minh kết nối Neon, đăng nhập Google, quota hay việc phục hồi sau khi Render ngủ trong dịch vụ thật. Chỉ đánh dấu triển khai hoàn tất sau khi kiểm tra những bước trên với tài khoản/cấu hình thật.
+
+## Quản lý số điện thoại
+
+Trong Environment của **Web Service** (không phải Static Site):
+
+- `ADMIN_EMAILS`: email Google đã xác minh của bạn; nếu có nhiều quản trị viên, phân cách bằng dấu phẩy. Không có danh sách này thì không ai được dùng API quản trị. Không cấp quyền bằng dữ liệu người dùng gửi lên.
+- `REQUIRE_REVIEWED_PHONE=true`: chặn Get Label đến khi người dùng có số được quản trị viên kiểm tra. Nếu bật mà thiếu ADMIN_EMAILS, máy chủ từ chối khởi động để tránh khóa toàn bộ người dùng mà không có người duyệt.
+
+Sau khi deploy:
+
+1. Đăng nhập bằng đúng email quản trị đã khai báo.
+2. Ở Get Label, mục **Số điện thoại tài khoản**, lưu số của bạn.
+3. Mở **Quản trị · số điện thoại người dùng** → **Tìm / tải danh sách**. Bạn có thể tìm email/số, thêm số vào tài khoản đã đăng nhập Google, sửa, xóa, đánh dấu đã kiểm tra hoặc bỏ đánh dấu. Có phân trang để không tải toàn bộ danh sách.
+4. Khi bạn đã đối chiếu thủ công, chọn **Xác nhận đã kiểm tra thủ công**. Đổi số sẽ tự bỏ đánh dấu cũ. Xóa số cần xác nhận; nó không xóa tài khoản Google hay dữ liệu Sheets.
+5. Người dùng có thể nhập/chỉnh số của chính họ; không xem danh sách của người khác và không tự đánh dấu đã kiểm tra. Tải lại thông tin để nhận trạng thái mới.
+
+Số Việt Nam được chuẩn hóa theo mã +84, số quốc tế cần mã +quốc gia. Dữ liệu lưu vào bảng `pm_phone_profiles`, không phải MySQL. Có khóa duy nhất chống một số trùng nhiều tài khoản và kiểm tra phiên bản để tránh ghi đè sửa đổi mới. Lịch sử thao tác `pm_phone_audit` chỉ ghi người thao tác, tài khoản đích, hành động, thời gian và 4 số cuối, không lưu token Google hay toàn bộ số vào lịch sử.
+
+Nên sửa qua giao diện để áp dụng chuẩn hóa, kiểm tra trùng và nhật ký; sửa trực tiếp bằng SQL có thể bỏ qua các bước này. Chủ database vẫn có quyền truy cập toàn bộ dữ liệu, vì vậy không chia sẻ DATABASE_URL với người dùng thường.
+
+**Không có SMS OTP hay xác minh SIM chính chủ trong chức năng này.** Một số hợp định dạng vẫn có thể thuộc người khác hoặc không còn hoạt động. Nhãn hiển thị là “Đã kiểm tra thủ công”, không phải đã nhận SMS. Muốn chứng minh nhận được số cần tích hợp OTP riêng và kiểm tra chi phí nhà cung cấp. Cut Label vẫn dùng được không đăng nhập và không yêu cầu số điện thoại; cổng kiểm tra áp dụng cho Get Label ở Web Service.
