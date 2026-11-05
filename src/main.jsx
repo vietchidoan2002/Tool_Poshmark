@@ -46,10 +46,10 @@ async function renderPage(page, scale = 3) {
   return canvas;
 }
 async function ocrPage(page, setStatus) {
-  const canvas = await renderPage(page, 300 / 72);
+  const canvas = await renderPage(page, 3.5);
   const langPath = new URL(".", new URL(englishDataUrl, window.location.href))
     .href;
-  const result = await recognizeLabel(
+  return recognizeLabel(
     canvas,
     (lang, mode, options) =>
       createWorker(lang, mode, {
@@ -61,14 +61,6 @@ async function ocrPage(page, setStatus) {
       }),
     setStatus,
   );
-  const thumbnail = document.createElement("canvas");
-  const ratio = Math.min(1, 800 / Math.max(canvas.width, canvas.height));
-  thumbnail.width = Math.max(1, Math.round(canvas.width * ratio));
-  thumbnail.height = Math.max(1, Math.round(canvas.height * ratio));
-  thumbnail
-    .getContext("2d")
-    .drawImage(canvas, 0, 0, thumbnail.width, thumbnail.height);
-  return { ...result, preview: thumbnail.toDataURL("image/jpeg", 0.85) };
 }
 async function cropToPdf(page) {
   // Render at 300 DPI (bounded for oversized PDFs); keep the barcode's aspect ratio.
@@ -358,13 +350,8 @@ function App() {
                   `Đang OCR: ${file.name} · trang ${i}/${pdf.numPages}`,
                 );
                 try {
-                  const result = await ocrPage(pg, (message) =>
-                    setCutMsg(
-                      `${file.name} · trang ${i}/${pdf.numPages} — ${message}`,
-                    ),
-                  );
+                  const result = await ocrPage(pg, setCutMsg);
                   text = result.text || nativeText;
-                  preview = result.preview;
                   id = id || result.orderId;
                   tracking = tracking || result.tracking;
                   ocrError = result.warning || "";
@@ -377,11 +364,10 @@ function App() {
                 }
               }
               try {
-                if (!preview)
-                  preview = (await renderPage(pg, 1)).toDataURL(
-                    "image/jpeg",
-                    0.85,
-                  );
+                preview = (await renderPage(pg, 1.3)).toDataURL(
+                  "image/jpeg",
+                  0.85,
+                );
               } catch {
                 ocrError += " Không tạo được ảnh xem trước.";
               }
@@ -536,7 +522,7 @@ function App() {
         <div className="logo">PM</div>
         <div className="headcopy">
           <h1>Poshmark Label Manager</h1>
-          <p>Đơn hàng gọn gàng. Label sẵn sàng.</p>
+          <p>Get Label · Cut Label · Chạy cục bộ trên máy</p>
         </div>
         <button className="ghost refresh" onClick={refresh}>
           Làm mới trạng thái
@@ -563,10 +549,10 @@ function App() {
               <h2>Get Label</h2>
               <p>
                 Đọc email chưa đọc của Gmail và ghi đơn vào Google Sheets theo
-                cấu hình của bạn.
+                logic tool gốc.
               </p>
             </div>
-            <span className="pill">Gmail → Google Sheets</span>
+            <span className="pill">Node.js backend</span>
           </div>
           <section className="configbox">
             <h3>Google Sheets</h3>
@@ -683,19 +669,12 @@ function App() {
               và tự điền lần sau.
             </p>
           </section>
-          <aside className="notice" role="note">
-            <strong>Lưu ý: thao tác trên dữ liệu thật</strong>
-            <p>
-              Get Label ghi vào Google Sheets và đánh dấu email đã xử lý là đã
-              đọc. Kiểm tra đúng Gmail, Sheet và tên tab trước khi chạy.
-            </p>
-          </aside>
           <section className="runbox">
             <div>
               <h3>Chạy lấy đơn</h3>
               <p>
                 Quét email chưa đọc, bỏ qua Order ID đã có trong Sheet, ghi dữ
-                liệu vào tab “{sheetName || "đã chọn"}”.
+                liệu vào tab “Đơn poshmark”.
               </p>
             </div>
             <button
@@ -737,18 +716,7 @@ function App() {
                 thành PDF 4×6 inch.
               </p>
             </div>
-            <span className="pill">Quét 1 lượt / trang</span>
-          </div>
-          <div className="workflow" aria-label="Các bước xử lý label">
-            <span>
-              <b>1</b> Thêm PDF
-            </span>
-            <span>
-              <b>2</b> Kiểm tra mã
-            </span>
-            <span>
-              <b>3</b> Xuất label
-            </span>
+            <span className="pill">OCR</span>
           </div>
           <label
             className={"dropzone " + (cutBusy ? "disabled" : "")}
@@ -759,7 +727,6 @@ function App() {
             }}
           >
             <input
-              aria-label="Thêm file PDF"
               type="file"
               accept="application/pdf,.pdf"
               multiple
@@ -771,7 +738,7 @@ function App() {
             />
             <span className="uploadIcon">↑</span>
             <b>Kéo thả PDF vào đây hoặc bấm để chọn</b>
-            <small>Chọn nhiều file cùng lúc · Tên file được điền tự động</small>
+            <small>PDF nhiều trang · OCR chạy trong trình duyệt</small>
           </label>
           <div className="status" role="status" aria-live="polite">
             {cutBusy && <span className="spinner" />}
@@ -816,14 +783,6 @@ function App() {
           )}
           {jobs.length > 0 && (
             <>
-              <aside className="notice" aria-label="Lưu ý trước khi xuất">
-                <strong>Kiểm tra trước khi xuất</strong>
-                <p>
-                  OCR có thể nhầm ký tự. Đối chiếu Order ID và USPS với label
-                  gốc. Bạn có thể đổi tên file; tên cần kiểm tra sẽ được hỏi
-                  trước khi xuất.
-                </p>
-              </aside>
               <div className="linehead listHead">
                 <div>
                   <h3>Danh sách label</h3>
@@ -865,15 +824,14 @@ function App() {
                         >
                           {p.orderId
                             ? p.source === "OCR"
-                              ? "Đã quét · đối chiếu lại"
+                              ? "OCR · cần đối chiếu ID"
                               : "Đã nhận diện"
                             : "Cần kiểm tra ID"}
                         </span>
                       </div>
                       <label className="field">
-                        Tên file xuất
+                        Tên file xuất (mặc định là Order ID)
                         <input
-                          aria-label={`Tên file · ${job.fileName} · trang ${p.pageNo}`}
                           value={p.outputName}
                           disabled={cutBusy}
                           onChange={(e) =>
@@ -886,10 +844,10 @@ function App() {
                         </small>
                       </label>
                       <div className="tracking-check">
-                        <b>USPS tracking</b>
+                        <b>USPS tracking · đối chiếu</b>
                         <output>
                           {p.tracking
-                            ? p.tracking
+                            ? p.tracking.replace(/(\d{4})(?=\d)/g, "$1 ")
                             : "Chưa đọc được mã tracking"}
                         </output>
                         <small>

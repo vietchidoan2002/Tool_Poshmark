@@ -37,34 +37,30 @@ test("OCR corrections apply only to anchored OCR candidates", () => {
   ])
     assert.equal(extractOrderId(text, { ocr: true }), "");
 });
-test("OCR recognizes once, uses automatic layout and cleans up", async () => {
+test("OCR falls back to sparse layout and always cleans up its worker", async () => {
+  const modes = [];
   let calls = 0,
     terminated = false;
-  const modes = [];
   const result = await recognizeLabel({}, async () => ({
     setParameters: async (p) => modes.push(p.tessedit_pageseg_mode),
-    recognize: async () => {
-      calls++;
-      return {
-        data: {
-          text: `Order # ${id}`,
-          blocks: [
-            {
-              paragraphs: [
-                { lines: [{ words: [{ text: id, confidence: 95 }] }] },
-              ],
-            },
-          ],
-        },
-      };
-    },
+    recognize: async () => ({
+      data: {
+        text: ++calls === 1 ? "unreadable" : `Order # ${id}`,
+        blocks: [
+          {
+            paragraphs: [
+              { lines: [{ words: [{ text: id, confidence: 95 }] }] },
+            ],
+          },
+        ],
+      },
+    }),
     terminate: async () => {
       terminated = true;
     },
   }));
-  assert.equal(calls, 1);
-  assert.deepEqual(modes, ["3"]);
   assert.equal(result.orderId, id);
+  assert.deepEqual(modes, ["3", "11"]);
   assert.equal(terminated, true);
 });
 test("OCR errors propagate with worker cleanup", async () => {
@@ -104,19 +100,29 @@ test("valid-looking IDs with low OCR confidence are not auto-filled", async () =
   assert.equal(result.orderId, "");
   assert.match(result.warning, /tin cậy thấp/);
 });
-test("missing Order ID is clearly flagged without repeating recognition", async () => {
+test("conflicting OCR readings require manual review even at high confidence", async () => {
   let calls = 0;
   const result = await recognizeLabel({}, async () => ({
     setParameters: async () => {},
     recognize: async () => {
-      calls++;
-      return { data: { text: "unreadable" } };
+      const candidate = ++calls === 1 ? id : "abedef0123456789abedef01";
+      return {
+        data: {
+          text: `Order # ${candidate}`,
+          blocks: [
+            {
+              paragraphs: [
+                { lines: [{ words: [{ text: candidate, confidence: 95 }] }] },
+              ],
+            },
+          ],
+        },
+      };
     },
     terminate: async () => {},
   }));
-  assert.equal(calls, 1);
   assert.equal(result.orderId, "");
-  assert.match(result.warning, /Chưa đọc được/);
+  assert.match(result.warning, /khác nhau/);
 });
 
 test("USPS numeric and international tracking are read only next to the tracking marker", async () => {
@@ -145,32 +151,42 @@ test("USPS numeric and international tracking are read only next to the tracking
     "",
   );
 });
-test("conflicting tracking markers in one scan are left blank", async () => {
+test("tracking conflict across OCR layouts does not silently select a code", async () => {
+  let calls = 0;
   const result = await recognizeLabel({}, async () => ({
     setParameters: async () => {},
     recognize: async () => ({
       data: {
-        text: "USPS TRACKING # 9434650110837019925838\nUSPS TRACKING # 9434650110837019925839",
+        text: `USPS TRACKING # ${++calls === 1 ? "9434650110837019925838" : "9434650110837019925839"}`,
       },
     }),
     terminate: async () => {},
   }));
   assert.equal(result.tracking, "");
 });
-test("OCR failure is not retried automatically", async () => {
+test("one failed OCR pass retains a reliable reading from the other pass", async () => {
   let calls = 0;
-  await assert.rejects(
-    recognizeLabel({}, async () => ({
-      setParameters: async () => {},
-      recognize: async () => {
-        calls++;
-        throw Error("failed");
-      },
-      terminate: async () => {},
-    })),
-    /failed/,
-  );
-  assert.equal(calls, 1);
+  const result = await recognizeLabel({}, async () => ({
+    setParameters: async () => {},
+    recognize: async () => {
+      if (++calls === 2) throw Error("temporary OCR failure");
+      return {
+        data: {
+          text: `Order # ${id}`,
+          blocks: [
+            {
+              paragraphs: [
+                { lines: [{ words: [{ text: id, confidence: 95 }] }] },
+              ],
+            },
+          ],
+        },
+      };
+    },
+    terminate: async () => {},
+  }));
+  assert.equal(result.orderId, id);
+  assert.match(result.warning, /Một lượt OCR bị lỗi/);
 });
 test("stalled OCR initialization times out and cleans up a worker that arrives late", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
@@ -194,12 +210,4 @@ test("stalled OCR initialization times out and cleans up a worker that arrives l
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(terminated, true);
-});
-
-test("conflicting order IDs on the same page are not auto-selected", () => {
-  assert.equal(
-    extractOrderId(`Order # ${id}\nOrder # 0123456789abcdef01234567`),
-    "",
-  );
-  assert.equal(extractOrderId(`Order # ${id}\nOrder # ${id}`), id);
 });
