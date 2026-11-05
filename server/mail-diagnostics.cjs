@@ -43,7 +43,7 @@ const messages = {
   ],
   DELIVERY_FAILED: [
     503,
-    "Chưa gửi được email xác nhận. Vui lòng thử lại sau hoặc liên hệ quản trị viên kiểm tra Gmail gửi thư.",
+    "Chưa gửi được email. Vui lòng thử lại sau hoặc liên hệ quản trị viên kiểm tra Gmail gửi thư.",
   ],
 };
 

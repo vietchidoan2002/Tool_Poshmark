@@ -6,7 +6,7 @@ Mở URL gốc của Web Service sẽ hiện form đăng nhập. Phải đăng n
 - Đăng nhập: email/mật khẩu, hiện/ẩn mật khẩu, trạng thái loading và ghi nhớ đăng nhập. Không chọn ghi nhớ: cookie theo phiên trình duyệt, phiên máy chủ tối đa 12 giờ. Có ghi nhớ: tối đa 30 ngày. Nên không chọn trên máy dùng chung.
 - Tài khoản mới đăng nhập khi chưa xác nhận email sẽ chỉ thấy trang kích hoạt: gửi lại email, kiểm tra lại trạng thái hoặc đăng xuất. Chưa xác nhận thì API công cụ cũng từ chối yêu cầu. Không tự gộp tài khoản chưa xác nhận với một danh tính Google chỉ vì trùng email.
 - Google cũ vẫn đăng nhập được bằng tùy chọn Google. Người dùng email/mật khẩu xác nhận email rồi kết nối Google: token gắn với tài khoản website đang đăng nhập, không đổi danh tính website sang tài khoản Gmail được kết nối.
-- Quên mật khẩu gửi thông báo giống nhau cho email có/không có tài khoản và không chờ độ trễ gửi thư của nhà cung cấp. Tác vụ gửi chạy trong tiến trình máy chủ với hàng chờ nhỏ; restart/deploy giữa chừng có thể làm mất lần gửi đang chạy, lúc đó người dùng yêu cầu lại. Liên kết reset hết hạn sau 30 phút, xác nhận email sau 24 giờ, chỉ dùng một lần và chỉ lưu hash token. Token nằm trong fragment URL, được xóa khỏi thanh địa chỉ sau khi đọc; không gửi token trong query string cho máy chủ hoặc ghi log. Xác nhận email yêu cầu đăng nhập đúng tài khoản đăng ký; nếu chưa đăng nhập, giao diện yêu cầu đăng nhập và giữ liên kết trong bộ nhớ để tiếp tục xác nhận. Nếu liên kết hết hạn, quay lại tài khoản để gửi lại.
+- Quên mật khẩu kiểm tra Gmail gửi thư trước: chưa kết nối/sai tài khoản/không đọc được token sẽ báo lỗi, hết hạn mức gửi/ngày hoặc hàng chờ đầy trả lỗi chờ thử lại. Các kiểm tra này áp dụng giống nhau với email có/không có tài khoản. Khi người gửi sẵn sàng, form chỉ xác nhận đã tiếp nhận yêu cầu và không chờ độ trễ gửi thư của nhà cung cấp; chưa phải xác nhận email đã vào hộp thư. Tác vụ gửi chạy trong tiến trình máy chủ với hàng chờ nhỏ; restart/deploy giữa chừng có thể làm mất lần gửi đang chạy, lúc đó người dùng yêu cầu lại. Liên kết reset hết hạn sau 30 phút, xác nhận email sau 24 giờ, chỉ dùng một lần và chỉ lưu hash token. Token nằm trong fragment URL, được xóa khỏi thanh địa chỉ sau khi đọc; không gửi token trong query string cho máy chủ hoặc ghi log. Xác nhận email yêu cầu đăng nhập đúng tài khoản đăng ký; nếu chưa đăng nhập, giao diện yêu cầu đăng nhập và giữ liên kết trong bộ nhớ để tiếp tục xác nhận. Nếu liên kết hết hạn, quay lại tài khoản để gửi lại.
 - Reset mật khẩu vô hiệu hóa mọi phiên mật khẩu cũ. Tài khoản Google cũ có thể tạo mật khẩu bằng luồng khôi phục email; quyền kết nối Google/Sheet vẫn giữ nguyên. Luồng này được ghi nhận là legacy-google-reset, không giả lập đồng ý đăng ký mới.
 - Giới hạn thử đăng nhập/gửi mail theo IP, khóa tạm sau nhiều lần sai và ngân sách tối đa 50 lần gửi email/ngày UTC. Tài nguyên băm mật khẩu cũng được giới hạn đồng thời để tránh vượt RAM Free.
 
@@ -27,6 +27,15 @@ Không bắt buộc mua dịch vụ SMS hoặc dùng SMTP. Phương án mặc đ
    - `AUTH_MAIL_SENDER_EMAIL`: đúng email Gmail quản trị viên đã kết nối ở bước 2.
 4. Deploy lại. Chỉ sau cấu hình này, ứng dụng mới dùng Gmail đó để gửi email xác nhận/khôi phục. Không tự dùng token của người dùng khác làm người gửi.
 5. Tạo tài khoản thử bằng email khác, kiểm tra nhận mail (kể cả Spam), xác nhận đúng phiên, reset một lần rồi thử đăng nhập lại. Không chia sẻ link reset hoặc secret.
+
+### Gửi khôi phục mật khẩu nhưng không nhận thư
+
+1. Chủ website cần hoàn tất **Tiếp tục với Google** và vào được Get Label bằng Gmail gửi thư. Nếu vẫn lỗi ở `/oauth2callback`, phải xử lý mã `OAUTH_...` trước; bấm khôi phục không sửa được kết nối Gmail này.
+2. Kiểm tra `AUTH_MAIL_PROVIDER=gmail`, `AUTH_MAIL_SENDER_EMAIL` và `ADMIN_EMAILS` khớp Gmail gửi thư; bật Gmail API trong đúng Cloud project.
+3. Trên form Quên mật khẩu, nhập email đã đăng ký. Kiểm tra thư rác/tất cả thư; ở Gmail gửi thư, kiểm tra mục Đã gửi. Không tự động yêu cầu lại liên tục vì có giới hạn chống gửi rác.
+4. Khi chưa có thư, chủ website mở Render → Logs, tìm `AUTH_MAIL_` tại thời điểm vừa yêu cầu khôi phục. Chỉ chia sẻ mã lỗi cố định, không chia sẻ token, khóa hay link reset. Thông báo đã nhận yêu cầu không chứng minh nhà cung cấp đã gửi hoặc người nhận đã nhận được thư.
+
+Kiểm tra cấu hình ban đầu không gọi gửi thư và không trừ hạn mức. Các lỗi phát sinh khi Google thực sự gửi (hết hạn token, chưa bật Gmail API, quyền/quota) vẫn được ghi mã chẩn đoán ở Logs; phản hồi công khai không tiết lộ tài khoản nào tồn tại qua kết quả gửi thư.
 
 ### Đã đăng ký nhưng không nhận được email
 

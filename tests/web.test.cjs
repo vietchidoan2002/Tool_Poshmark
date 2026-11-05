@@ -1153,3 +1153,129 @@ test("OAuth callback explains failures at each stage without exposing codes, sec
     ),
   );
 });
+
+test("password recovery reports a disconnected sender before acknowledging known or unknown addresses", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const { browser, pool } = await fixture(t, undefined, {
+    adminEmails: "Sender@example.test",
+    mailProvider: "gmail",
+    mailSenderEmail: "Sender@example.test",
+  });
+  const user = browser();
+  await user("/api/auth/register", {
+    method: "POST",
+    body: {
+      name: "Recovery User",
+      email: "recovery@example.test",
+      phone: "0901234567",
+      password: "test-password",
+      confirmPassword: "test-password",
+      acceptTerms: true,
+    },
+  });
+  const responses = [];
+  for (const email of ["recovery@example.test", "missing@example.test"]) {
+    const result = await user("/api/auth/forgot-password", {
+      method: "POST",
+      body: { email },
+    });
+    assert.equal(result.status, 503);
+    responses.push(await result.json());
+  }
+  assert.deepEqual(responses[0], responses[1]);
+  assert.equal(responses[0].code, "AUTH_MAIL_SENDER_NOT_CONNECTED");
+  assert.match(responses[0].error, /Tiếp tục với Google/);
+  assert.equal(
+    (await pool.query("SELECT * FROM pm_account_actions WHERE purpose='reset'"))
+      .rows.length,
+    0,
+  );
+  assert.equal(
+    (await pool.query("SELECT * FROM pm_mail_budget")).rows.length,
+    0,
+  );
+});
+
+test("password recovery reports the daily sender limit identically for known and unknown addresses", async (t) => {
+  let delivered = 0;
+  const { browser, pool } = await fixture(t, undefined, {
+    sendEmail: async () => {
+      delivered++;
+    },
+  });
+  const user = browser();
+  await user("/api/auth/register", {
+    method: "POST",
+    body: {
+      name: "Recovery User",
+      email: "recovery@example.test",
+      phone: "0901234567",
+      password: "test-password",
+      confirmPassword: "test-password",
+      acceptTerms: true,
+    },
+  });
+  await pool.query("UPDATE pm_mail_budget SET used=50");
+  const responses = [];
+  for (const email of ["recovery@example.test", "missing@example.test"]) {
+    const result = await user("/api/auth/forgot-password", {
+      method: "POST",
+      body: { email },
+    });
+    assert.equal(result.status, 429);
+    responses.push(await result.json());
+  }
+  assert.deepEqual(responses[0], responses[1]);
+  assert.equal(responses[0].code, "AUTH_MAIL_DAILY_LIMIT");
+  assert.equal(delivered, 1);
+  assert.equal(
+    (await pool.query("SELECT * FROM pm_account_actions WHERE purpose='reset'"))
+      .rows.length,
+    0,
+  );
+});
+
+test("password recovery reports a busy mail queue instead of silently dropping requests", async (t) => {
+  let hold = false,
+    release;
+  const delivery = new Promise((resolve) => {
+    release = resolve;
+  });
+  t.after(() => release());
+  const { browser } = await fixture(t, undefined, {
+    sendEmail: async () => {
+      if (hold) await delivery;
+    },
+  });
+  const user = browser();
+  await user("/api/auth/register", {
+    method: "POST",
+    body: {
+      name: "Recovery User",
+      email: "recovery@example.test",
+      phone: "0901234567",
+      password: "test-password",
+      confirmPassword: "test-password",
+      acceptTerms: true,
+    },
+  });
+  hold = true;
+  for (let i = 0; i < 10; i++) {
+    const result = await user("/api/auth/forgot-password", {
+      method: "POST",
+      headers: { "x-forwarded-for": "198.51.100." + (i + 1) },
+      body: { email: "recovery@example.test" },
+    });
+    assert.equal(result.status, 200);
+  }
+  for (const email of ["recovery@example.test", "missing@example.test"]) {
+    const result = await user("/api/auth/forgot-password", {
+      method: "POST",
+      headers: { "x-forwarded-for": "198.51.100.100" },
+      body: { email },
+    });
+    assert.equal(result.status, 429);
+    assert.match((await result.json()).error, /đang xử lý nhiều email/);
+  }
+  release();
+});

@@ -368,17 +368,19 @@ async function mountPasswordAuth(app, pool, config, deps) {
   );
   const pendingMail = new Set();
   const deliver = sendEmail;
+  async function prepareMailSender() {
+    try {
+      return await deliver?.prepare?.();
+    } catch (error) {
+      const diagnostic = mailDiagnostic(error);
+      console.error(`[${diagnostic.code}] ${diagnostic.message}`);
+      throw diagnostic;
+    }
+  }
   const sendBounded = deliver
-    ? async (message) => {
+    ? async (message, preparedSender) => {
         // Check the configured Gmail before reserving a daily send attempt.
-        let prepared;
-        try {
-          prepared = await deliver.prepare?.();
-        } catch (error) {
-          const diagnostic = mailDiagnostic(error);
-          console.error(`[${diagnostic.code}] ${diagnostic.message}`);
-          throw diagnostic;
-        }
+        const prepared = preparedSender || (await prepareMailSender());
         const day = new Date().toISOString().slice(0, 10);
         await pool.query(
           "INSERT INTO pm_mail_budget(day_key,used) VALUES($1,0) ON CONFLICT(day_key) DO NOTHING",
@@ -401,14 +403,12 @@ async function mountPasswordAuth(app, pool, config, deps) {
   const wrap = (fn) => (req, res, next) =>
     Promise.resolve(fn(req, res)).catch((error) =>
       error.status
-        ? res
-            .status(error.status)
-            .json({
-              error: error.message,
-              ...(String(error.code || "").startsWith("AUTH_MAIL_")
-                ? { code: error.code }
-                : {}),
-            })
+        ? res.status(error.status).json({
+            error: error.message,
+            ...(String(error.code || "").startsWith("AUTH_MAIL_")
+              ? { code: error.code }
+              : {}),
+          })
         : next(error),
     );
   const origin = (req, res, next) =>
@@ -462,7 +462,7 @@ async function mountPasswordAuth(app, pool, config, deps) {
       req.session.save((error) => (error ? reject(error) : resolve())),
     );
   }
-  async function sendAction(account, purpose) {
+  async function sendAction(account, purpose, preparedSender) {
     const token = await accounts.issue(account.user_id, purpose);
     const link =
       new URL(config.baseUrl).origin +
@@ -470,20 +470,23 @@ async function mountPasswordAuth(app, pool, config, deps) {
       (purpose === "reset" ? "reset-password" : "verify-email") +
       "?token=" +
       token;
-    await sendBounded({
-      to: account.email,
-      subject:
-        purpose === "reset"
-          ? "Đặt lại mật khẩu Poshmark Label Manager"
-          : "Xác nhận email Poshmark Label Manager",
-      text:
-        (purpose === "reset"
-          ? "Liên kết đặt lại mật khẩu có hiệu lực 30 phút."
-          : "Đăng nhập bằng tài khoản vừa đăng ký rồi mở liên kết xác nhận (hiệu lực 24 giờ).") +
-        "\n" +
-        link +
-        "\nNếu bạn không yêu cầu, hãy bỏ qua email này. Không chia sẻ liên kết hoặc mật khẩu.",
-    });
+    await sendBounded(
+      {
+        to: account.email,
+        subject:
+          purpose === "reset"
+            ? "Đặt lại mật khẩu Poshmark Label Manager"
+            : "Xác nhận email Poshmark Label Manager",
+        text:
+          (purpose === "reset"
+            ? "Liên kết đặt lại mật khẩu có hiệu lực 30 phút."
+            : "Đăng nhập bằng tài khoản vừa đăng ký rồi mở liên kết xác nhận (hiệu lực 24 giờ).") +
+          "\n" +
+          link +
+          "\nNếu bạn không yêu cầu, hãy bỏ qua email này. Không chia sẻ liên kết hoặc mật khẩu.",
+      },
+      preparedSender,
+    );
   }
   app.use("/api", (req, res, next) =>
     checkSession(req)
@@ -572,17 +575,33 @@ async function mountPasswordAuth(app, pool, config, deps) {
           503,
           "Chưa cấu hình gửi email khôi phục. Vui lòng liên hệ quản trị viên.",
         );
+      // These checks concern the website's sender, not the entered account.
+      // Run them for every address so failures cannot reveal registered users.
+      const preparedSender = await prepareMailSender();
+      if (pendingMail.size >= 10)
+        throw fail(
+          429,
+          "Máy chủ đang xử lý nhiều email. Vui lòng thử lại sau.",
+        );
+      const budget = (
+        await pool.query("SELECT used FROM pm_mail_budget WHERE day_key=$1", [
+          new Date().toISOString().slice(0, 10),
+        ])
+      ).rows[0];
+      if (budget?.used >= 50) throw mailError("DAILY_LIMIT");
       const account = await accounts.recipient(email);
-      if (account && pendingMail.size < 10) {
+      if (account) {
         // Return independently of the mail provider's latency, for both known and unknown emails.
-        const task = sendAction(account, "reset").catch(() => {});
+        const task = sendAction(account, "reset", preparedSender).catch(
+          () => {},
+        );
         pendingMail.add(task);
         task.finally(() => pendingMail.delete(task));
       }
       res.json({
         ok: true,
         message:
-          "Nếu email có tài khoản, hướng dẫn khôi phục sẽ được gửi. Vui lòng kiểm tra cả thư rác.",
+          "Đã nhận yêu cầu khôi phục. Vui lòng kiểm tra hộp thư và thư rác. Nếu email đã đăng ký nhưng chưa nhận được thư, hãy liên hệ quản trị viên.",
       });
     }),
   );
