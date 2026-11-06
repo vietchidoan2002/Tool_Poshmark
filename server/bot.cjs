@@ -7,7 +7,7 @@ const { createGoogleRequest } = require('./google-request.cjs');
 const ROOT = path.resolve(__dirname, '..');
 const CONFIG_PATH = path.join(ROOT, 'config.json');
 const CREDENTIALS_PATH = path.join(ROOT, 'credentials.json');
-const APP_CONFIG = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
+const APP_CONFIG = process.env.APP_MODE !== 'web' && fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
 const SPREADSHEET_ID = String(APP_CONFIG.sheetId || '').trim();
 
 function logLine(level, message) {
@@ -35,16 +35,19 @@ function formatMockupUrl(url) {
 }
 
 async function processOrders(auth, manualAccountName, sheetName, options = {}) {
+    const log = options.log || logLine;
+    const spreadsheetId = options.spreadsheetId || SPREADSHEET_ID;
     let writtenCount = 0;
+    let writtenOrderCount = 0;
     let skippedCount = 0;
     const gmail = options.gmail || google.gmail({ version: 'v1', auth });
     const sheets = options.sheets || google.sheets({ version: 'v4', auth });
     const request = options.request || createGoogleRequest({
-        onRetry: (attempt, delay) => logLine('WARN', `Google giới hạn/tạm lỗi; thử lại ${attempt}/3 sau ${Math.ceil(delay / 1000)} giây.`)
+        onRetry: (attempt, delay) => log('WARN', `Google giới hạn/tạm lỗi; thử lại ${attempt}/3 sau ${Math.ceil(delay / 1000)} giây.`)
     });
 
     try {
-        logLine("SCAN", `Account: ${manualAccountName} | Đang quét email...`);
+        log("SCAN", `Account: ${manualAccountName} | Đang quét email...`);
 
         // ==========================================
         // TÍNH NĂNG MỚI: QUÉT SHEET TÌM DÒNG TRỐNG & LƯU LẠI CÁC ID ĐÃ CÓ
@@ -54,7 +57,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
 
         try {
             const response = await request(requestOptions => sheets.spreadsheets.values.get({
-                spreadsheetId: SPREADSHEET_ID,
+                spreadsheetId,
                 range: `'${sheetName.replace(/'/g, "''")}'!H:H`,
             }, requestOptions));
             const rows = response.data.values;
@@ -75,7 +78,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
             }
             targetRow = Math.max(lastDataRow + 1, 2);
         } catch (sheetErr) {
-            logLine("ERROR", `Không thể đọc Google Sheets: ${sheetErr.message}`);
+            log("ERROR", `Không thể đọc Google Sheets: ${sheetErr.message}`);
             throw sheetErr;
         }
 
@@ -83,11 +86,11 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
         const messages = res.data.messages;
         
         if (!messages || messages.length === 0) {
-            logLine("INFO", "Không có email mới cần xử lý.");
-            return { writtenCount, skippedCount };
+            log("INFO", "Không có email mới cần xử lý.");
+            return { writtenCount, writtenOrderCount, skippedCount };
         }
 
-        logLine("INFO", `Tìm thấy ${messages.length} email chưa đọc.`);
+        log("INFO", `Tìm thấy ${messages.length} email chưa đọc.`);
 
         for (const msg of messages) {
             const msgId = msg.id;
@@ -161,7 +164,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
 
             let canMarkRead = orderBlocks.length > 1;
             if (orderBlocks.length <= 1) {
-                console.log(`  -> ⚠️ BỎ QUA: Thư này không chứa thông tin Đơn Hàng hợp lệ.`);
+                log("INFO", `  -> ⚠️ BỎ QUA: Thư này không chứa thông tin Đơn Hàng hợp lệ.`);
             } else {
                 let currentImgIndex = 0; 
 
@@ -174,7 +177,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                     
                     if (!orderId) {
                         canMarkRead = false;
-                        console.log(`  -> ⚠️ LỖI NHỎ: Bắt được Đơn nhưng không tìm thấy Mã Order ID (24 ký tự)!`);
+                        log("INFO", `  -> ⚠️ LỖI NHỎ: Bắt được Đơn nhưng không tìm thấy Mã Order ID (24 ký tự)!`);
                         continue;
                     }
 
@@ -183,7 +186,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                     // ==========================================
                     if (existingOrderIds.has(orderId)) {
                         skippedCount++;
-                        logLine("SKIP", `Đơn ID ${orderId} đã có trong Sheet.`);
+                        log("SKIP", `Đơn ID ${orderId} đã có trong Sheet.`);
                         // Vẫn tăng biến đếm ảnh để các đơn chưa có bên dưới không bị lấy nhầm ảnh của đơn đã bỏ qua
                         const skippedItemsCount = Math.max(block.split(/Size:/i).length - 1, 1);
                         currentImgIndex += skippedItemsCount;
@@ -259,18 +262,19 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                         dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!R${targetRow}`, values: [[orderId]] });
                         dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!W${targetRow}`, values: [[currentMockup]] });
 
-                        logLine("ORDER", `Đang ghi đơn ${orderId} | Buyer: ${item.buyer || "N/A"} | Size: ${item.size || "N/A"}`);
+                        log("ORDER", `Đang ghi đơn ${orderId} | Buyer: ${item.buyer || "N/A"} | Size: ${item.size || "N/A"}`);
                         targetRow++;
                     }
 
                     if (dataToWrite.length > 0) {
                         await request(requestOptions => sheets.spreadsheets.values.batchUpdate({
-                            spreadsheetId: SPREADSHEET_ID,
+                            spreadsheetId,
                             resource: { valueInputOption: 'USER_ENTERED', data: dataToWrite }
                         }, requestOptions));
                         writtenCount += dataToWrite.length / 11;
+                        writtenOrderCount++;
                         existingOrderIds.add(orderId);
-                        logLine("OK", `Đã ghi đơn ${orderId} vào Sheet.`);
+                        log("OK", `Đã ghi đơn ${orderId} vào Sheet.`);
                     }
                 }
             }
@@ -280,13 +284,13 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                 resource: { removeLabelIds: ['UNREAD'] }
             }, requestOptions));
         }
-        if (res.data.nextPageToken) logLine('INFO', 'Còn email chưa xử lý. Chạy lại để tiếp tục (tối đa 25 email mỗi lần).');
-        logLine("OK", `Hoàn tất account ${manualAccountName} | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount}`);
-        return { writtenCount, skippedCount };
+        if (res.data.nextPageToken) log('INFO', 'Còn email chưa xử lý. Chạy lại để tiếp tục (tối đa 25 email mỗi lần).');
+        log("OK", `Hoàn tất account ${manualAccountName} | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount}`);
+        return { writtenCount, writtenOrderCount, skippedCount };
 
     } catch (error) {
-        error.partialStats = { writtenCount, skippedCount };
-        logLine("ERROR", `Dừng xử lý | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount} | ${error.message}`);
+        error.partialStats = { writtenCount, writtenOrderCount, skippedCount };
+        log("ERROR", `Dừng xử lý | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount} | ${error.message}`);
         throw error;
     }
 }

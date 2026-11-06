@@ -20,7 +20,12 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '1mb' }));
 
 function readConfig() {
-  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); }
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    // Migrate the old example placeholder without changing a real saved ID.
+    if (config.sheetId === 'PASTE_GOOGLE_SHEET_ID_HERE') config.sheetId = '';
+    return config;
+  }
   catch { return { sheetId: '' }; }
 }
 function writeConfig(config) {
@@ -36,6 +41,9 @@ function loadOAuth() {
   if (!key?.client_id || !key?.client_secret) throw new Error('credentials.json thiếu client_id hoặc client_secret.');
   return new google.auth.OAuth2(key.client_id, key.client_secret, 'http://localhost:3210/oauth2callback');
 }
+
+app.get('/api/session', (req,res) => res.json({webMode:false,authenticated:true}));
+app.get('/api/version', (req,res) => res.set('Cache-Control','no-store').json({version:'local'}));
 
 app.get('/api/config', (req, res) => {
   const config = readConfig();

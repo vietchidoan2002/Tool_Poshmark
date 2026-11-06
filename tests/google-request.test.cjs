@@ -30,12 +30,12 @@ test('retry does not overrun the API execution budget', async () => {
     assert.deepEqual(waits, []);
 });
 
-function clients({ failModify = false, unrelated = false, duplicate = false } = {}) {
+function clients({ failModify = false, unrelated = false, duplicate = false, multi = false } = {}) {
     let writes = 0, modifies = 0;
     const id = 'abcdef0123456789abcdef01';
     const gmail = { users: { messages: {
         list: async args => { assert.equal(args.maxResults, 25); return { data: { messages: [{ id: 'test' }] } }; },
-        get: async () => ({ data: { payload: { headers: [], mimeType: 'text/plain', body: { data: Buffer.from(unrelated ? 'Newsletter' : `Order Number ${id} Size: M Buyer: @sample`).toString('base64') } } } }),
+        get: async () => ({ data: { payload: { headers: [], mimeType: 'text/plain', body: { data: Buffer.from(unrelated ? 'Newsletter' : `Order Number ${id} Size: M Buyer: @sample${multi ? " Size: L Buyer: @sample" : ""}`).toString('base64') } } } }),
         modify: async () => { modifies++; if (failModify) throw new Error('quota exhausted'); return {}; }
     } } };
     const sheets = { spreadsheets: { values: {
@@ -47,17 +47,24 @@ function clients({ failModify = false, unrelated = false, duplicate = false } = 
 test('a Gmail failure after a Sheets write propagates accurate partial counts', async () => {
     const options = clients({ failModify: true });
     await assert.rejects(processOrders(null, 'Test', 'Orders', options), error => {
-        assert.deepEqual(error.partialStats, { writtenCount: 1, skippedCount: 0 }); return true;
+        assert.deepEqual(error.partialStats, { writtenCount: 1, writtenOrderCount: 1, skippedCount: 0 }); return true;
     });
     assert.deepEqual(options.counts(), { writes: 1, modifies: 1 });
 });
 test('rerunning after a partial write skips duplicate IDs regardless of case', async () => {
     const options = clients({ duplicate: true });
-    assert.deepEqual(await processOrders(null, 'Test', 'Orders', options), { writtenCount: 0, skippedCount: 1 });
+    assert.deepEqual(await processOrders(null, 'Test', 'Orders', options), { writtenCount: 0, writtenOrderCount: 0, skippedCount: 1 });
     assert.deepEqual(options.counts(), { writes: 0, modifies: 1 });
 });
 test('unrelated mail is not marked read', async () => {
     const options = clients({ unrelated: true });
     await processOrders(null, 'Test', 'Orders', options);
     assert.deepEqual(options.counts(), { writes: 0, modifies: 0 });
+});
+
+test('a multi-item order counts once for dashboard orders while preserving item-row counts', async () => {
+ const stats=await processOrders(null,'Test','Orders',clients({multi:true}));
+ assert.equal(stats.writtenCount,2);
+ assert.equal(stats.writtenOrderCount,1);
+ await assert.rejects(processOrders(null,'Test','Orders',clients({multi:true,failModify:true})),error=>error.partialStats.writtenOrderCount===1&&error.partialStats.writtenCount===2);
 });

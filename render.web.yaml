@@ -1,0 +1,32 @@
+# Full web on Render Free + an external Neon Free PostgreSQL database.
+# No paid database or paid Render plan is declared here.
+services:
+  - type: web
+    name: poshmark-label-web
+    runtime: node
+    branch: preview/ui-single-pass-ocr
+    plan: free
+    buildCommand: npm ci --include=dev && npm test && npm run build:web
+    startCommand: npm run start:web
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_MODE
+        value: web
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: REQUIRE_REVIEWED_PHONE
+        value: "false"
+      - key: PG_POOL_MAX
+        value: "4"
+      - key: DATABASE_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: TOKEN_ENCRYPTION_KEY
+        generateValue: true
