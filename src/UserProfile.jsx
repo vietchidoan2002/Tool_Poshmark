@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import PhoneManager from "./PhoneManager.jsx";
 
-export default function UserProfile({ onEligibility }) {
+export default function UserProfile({ onEligibility, onSetPassword }) {
   const [account, setAccount] = useState(null);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
@@ -66,6 +66,18 @@ export default function UserProfile({ onEligibility }) {
         </section>
       )}
       <PhoneManager onEligibility={onEligibility} />
+      {account?.needsPasswordSetup && (
+        <aside className="notice">
+          <strong>Thiết lập mật khẩu</strong>
+          <p>
+            Bạn có thể tiếp tục đăng nhập bằng Google. Để dùng thêm email và mật
+            khẩu, hãy tạo mật khẩu mới qua email.
+          </p>
+          <button className="secondary" onClick={onSetPassword}>
+            Thiết lập mật khẩu qua email
+          </button>
+        </aside>
+      )}
     </main>
   );
 }

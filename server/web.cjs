@@ -249,12 +249,26 @@ async function createWebApp(config, deps = {}) {
         return res
           .status(400)
           .send("Phiên tài khoản đã thay đổi. Hãy kết nối lại.");
-      const ownerId = pending.userId || identity.sub;
-      const owner = pending.userId ? await store.get(ownerId) : null;
-      await store.connect(ownerId, owner?.email || identity.email, {
-        ...tokens,
-        pm_connected_email: identity.email,
-      });
+      const ownerId = pending.userId || (await store.claimGoogle(identity));
+      const owner = await store.get(ownerId);
+      let preserveMailbox = false;
+      if (!pending.userId && owner?.tokens) {
+        try {
+          const mailbox = store.decrypt(
+            owner.tokens,
+            ownerId,
+          )?.pm_connected_email;
+          preserveMailbox =
+            mailbox && mailbox.toLowerCase() !== identity.email.toLowerCase();
+        } catch {
+          /* A new Google authorization can replace unreadable credentials. */
+        }
+      }
+      if (!preserveMailbox)
+        await store.connect(ownerId, owner?.email || identity.email, {
+          ...tokens,
+          pm_connected_email: identity.email,
+        });
       const account = await passwordAuth.accounts.get(ownerId);
       if (
         account &&
@@ -265,7 +279,7 @@ async function createWebApp(config, deps = {}) {
           [ownerId],
         );
       req.oauthStage = "SESSION_SAVE";
-      if (pending.userId && account) {
+      if (account) {
         await passwordAuth.authenticate(
           req,
           ownerId,
@@ -320,6 +334,11 @@ async function createWebApp(config, deps = {}) {
   );
   const { mountPhones } = require("./phones.cjs");
   const phones = await mountPhones(app, pool, store, config);
+  const { initializeIdentities } = require("./user-identity.cjs");
+  Object.assign(
+    store,
+    await initializeIdentities(pool, store, { lockTables: !config.testing }),
+  );
   app.get(
     "/api/config",
     asyncRoute(async (req, res) => {

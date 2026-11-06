@@ -48,6 +48,7 @@ async function createWebStore(pool, secret) {
       ).rows[0];
     },
     decrypt,
+    encrypt,
     async connect(id, email, tokens) {
       const previous = await this.get(id);
       const old = previous?.tokens ? decrypt(previous.tokens, id) : {};

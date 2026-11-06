@@ -4,6 +4,7 @@ const derive = promisify(crypto.scrypt);
 const { rateLimit } = require("express-rate-limit");
 const { normalizePhone } = require("./phones.cjs");
 const { mailError, mailDiagnostic } = require("./mail-diagnostics.cjs");
+const { DISABLED_PASSWORD } = require("./user-identity.cjs");
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const emailAddress = (value) => {
   const email = String(value || "")
@@ -438,6 +439,15 @@ async function mountPasswordAuth(app, pool, config, deps) {
   });
   async function checkSession(req) {
     if (!req.session.userId) return;
+    if (
+      deps.userStore.resolveId &&
+      (await deps.userStore.resolveId(req.session.userId)) !==
+        req.session.userId
+    ) {
+      delete req.session.userId;
+      delete req.session.authVersion;
+      return;
+    }
     const account = await accounts.get(req.session.userId);
     if (
       account &&
@@ -674,6 +684,7 @@ async function mountPasswordAuth(app, pool, config, deps) {
         emailVerified: account ? account.email_verified : true,
         email: account?.email || user?.email || "",
         name: account?.display_name || "",
+        needsPasswordSetup: account?.password_hash === DISABLED_PASSWORD,
         emailConfigured: !!sendEmail,
       });
     }),
@@ -689,6 +700,7 @@ async function mountPasswordAuth(app, pool, config, deps) {
   };
 }
 module.exports = {
+  createAccountStore,
   mountPasswordAuth,
   hashPassword,
   checkPassword,

@@ -4,7 +4,7 @@ Mở URL gốc của Web Service sẽ hiện form đăng nhập. Phải đăng n
 
 - Đăng ký: tên hiển thị, email, **số điện thoại bắt buộc**, mật khẩu 8–128 ký tự, xác nhận mật khẩu, đồng ý điều khoản. Tài khoản mới được tạo riêng với mật khẩu băm scrypt và salt ngẫu nhiên. Không gửi hoặc lưu mật khẩu dạng rõ. Số được kiểm tra định dạng, chuẩn hóa E.164 và chống trùng ở máy chủ; tài khoản và số được lưu trong cùng giao dịch. Đăng ký không tự đăng nhập: giao diện quay về form đăng nhập kèm thông báo kết quả gửi email.
 - Đăng nhập: email/mật khẩu, hiện/ẩn mật khẩu, trạng thái loading và ghi nhớ đăng nhập. Không chọn ghi nhớ: cookie theo phiên trình duyệt, phiên máy chủ tối đa 12 giờ. Có ghi nhớ: tối đa 30 ngày. Nên không chọn trên máy dùng chung.
-- Tài khoản mới đăng nhập khi chưa xác nhận email sẽ chỉ thấy trang kích hoạt: gửi lại email, kiểm tra lại trạng thái hoặc đăng xuất. Chưa xác nhận thì API công cụ cũng từ chối yêu cầu. Không tự gộp tài khoản chưa xác nhận với một danh tính Google chỉ vì trùng email.
+- Tài khoản mới đăng nhập khi chưa xác nhận email sẽ chỉ thấy trang kích hoạt: gửi lại email, kiểm tra lại trạng thái hoặc đăng xuất. Chưa xác nhận thì API công cụ cũng từ chối yêu cầu. Mỗi email chỉ có một tài khoản, không phân biệt chữ hoa/thường. Đăng nhập Google chỉ dùng danh tính đã được Google xác minh. Nếu email đã có mật khẩu được xác nhận thì hai cách đăng nhập dùng chung tài khoản; nếu bản đăng ký mật khẩu chưa xác nhận, Google xác minh quyền sở hữu email nhưng mật khẩu cũ bị vô hiệu hóa, các phiên/link cũ bị thu hồi. Người sở hữu có thể tiếp tục dùng Google và thiết lập mật khẩu mới qua email trong Hồ sơ.
 - Google cũ vẫn đăng nhập được bằng tùy chọn Google. Người dùng email/mật khẩu xác nhận email rồi kết nối Google: token gắn với tài khoản website đang đăng nhập, không đổi danh tính website sang tài khoản Gmail được kết nối.
 - Quên mật khẩu kiểm tra Gmail gửi thư trước: chưa kết nối/sai tài khoản/không đọc được token sẽ báo lỗi, hết hạn mức gửi/ngày hoặc hàng chờ đầy trả lỗi chờ thử lại. Các kiểm tra này áp dụng giống nhau với email có/không có tài khoản. Khi người gửi sẵn sàng, form chỉ xác nhận đã tiếp nhận yêu cầu và không chờ độ trễ gửi thư của nhà cung cấp; chưa phải xác nhận email đã vào hộp thư. Tác vụ gửi chạy trong tiến trình máy chủ với hàng chờ nhỏ; restart/deploy giữa chừng có thể làm mất lần gửi đang chạy, lúc đó người dùng yêu cầu lại. Liên kết reset hết hạn sau 30 phút, xác nhận email sau 24 giờ, chỉ dùng một lần và chỉ lưu hash token. Token nằm trong fragment URL, được xóa khỏi thanh địa chỉ sau khi đọc; không gửi token trong query string cho máy chủ hoặc ghi log. Xác nhận email yêu cầu đăng nhập đúng tài khoản đăng ký; nếu chưa đăng nhập, giao diện yêu cầu đăng nhập và giữ liên kết trong bộ nhớ để tiếp tục xác nhận. Nếu liên kết hết hạn, quay lại tài khoản để gửi lại.
 - Reset mật khẩu vô hiệu hóa mọi phiên mật khẩu cũ. Tài khoản Google cũ có thể tạo mật khẩu bằng luồng khôi phục email; quyền kết nối Google/Sheet vẫn giữ nguyên. Luồng này được ghi nhận là legacy-google-reset, không giả lập đồng ý đăng ký mới.
@@ -45,10 +45,8 @@ Nếu chủ website đã đăng ký email/mật khẩu trước khi kết nối 
 
 1. Ở trang **Xác nhận email của bạn**, bấm **Đăng xuất**.
 2. Trên form đăng nhập, chọn **Tiếp tục với Google**, dùng đúng Gmail khai báo trong `AUTH_MAIL_SENDER_EMAIL` và `ADMIN_EMAILS`, cấp đủ quyền Gmail/Sheets. Chỉ đăng nhập email/mật khẩu không tạo kết nối Gmail API.
-3. Sau khi Google đưa về công cụ, bấm **Đăng xuất** rồi đăng nhập lại bằng email/mật khẩu của tài khoản website đang chờ kích hoạt.
-4. Bấm **Gửi lại email xác nhận**, mở thư và xác nhận. Không cần tạo lại tài khoản hoặc sửa cờ `email_verified` trong database.
-
-Đăng nhập Google không tự gộp hay xác nhận tài khoản mật khẩu trùng email. Liên kết xác nhận được gửi cho tài khoản mật khẩu; chỉ tài khoản đó được dùng liên kết.
+3. Khi Google đưa về công cụ, email đã được Google xác minh và dùng chung một tài khoản. Nếu Hồ sơ có nút **Thiết lập mật khẩu qua email**, dùng nút này để tạo mật khẩu mới; không dùng lại mật khẩu của bản đăng ký chưa xác nhận.
+4. Từ lúc này Gmail quản trị đã kết nối có thể gửi thư xác nhận/khôi phục cho các tài khoản khác. Tài khoản đăng ký email/mật khẩu thông thường vẫn cần xác nhận email. Không cần tạo lại tài khoản hoặc sửa cờ xác nhận trực tiếp trong database.
 
 Nếu Google báo **400: redirect_uri_mismatch**, mở **Google Auth Platform → Clients**, chọn Web client có ID khớp `GOOGLE_CLIENT_ID` của Render. Thêm `https://poshmark-label-web.onrender.com/oauth2callback` vào **Authorized redirect URIs**, lưu, chờ vài phút và bắt đầu lại từ nút Google trên website. Nếu dùng tên miền khác, thay bằng tên miền thật. URI phải khớp cả HTTPS, tên miền, đường dẫn và dấu gạch cuối; JavaScript origins không thay thế redirect URIs. Nếu đã đặt `PUBLIC_BASE_URL` trên Render, nó phải là origin của web, ví dụ `https://poshmark-label-web.onrender.com` (không thêm `/oauth2callback`). Không cần tạo lại database hoặc thay khóa phiên/mã hóa.
 
@@ -93,8 +91,24 @@ Nếu không có cấu hình gửi email, giao diện thông báo rõ. Quên m�
 
 Có hỗ trợ adapter Resend với `RESEND_API_KEY` và `AUTH_EMAIL_FROM` nếu bạn đã có sender/domain được nhà cung cấp xác nhận. Không cam kết gửi cho mọi người miễn phí khi chưa có domain và chưa kiểm tra hạn mức. Không đặt hai phương án cùng lúc nếu chưa xác định muốn dùng Gmail hay Resend.
 
+## Một email chỉ có một tài khoản
+
+- Khi deploy bản mới, các bản ghi email trùng được gộp tự động. Không sửa/xóa tay bản ghi trên Neon trước khi deploy. Đăng nhập lại sau deploy vì phiên cũ của các bản ghi được gộp sẽ bị vô hiệu hóa.
+- Bản tài khoản có mật khẩu đã xác nhận được ưu tiên làm tài khoản chính; nếu chưa có thì ưu tiên bản mật khẩu để giữ ID ổn định. Giữ cấu hình Sheet/token của tài khoản chính; nếu trống thì lấy từ bản còn lại. Đăng nhập Google không tự đổi Gmail xử lý đơn khác mà bạn đã chọn; nút kết nối Google trong Get Label vẫn cho phép thay đổi rõ ràng.
+- SĐT đã kiểm tra được ưu tiên; số/cấu hình bị thay thế vẫn nằm trong bản sao. Mã hóa token được tạo lại theo ID tài khoản chính, giữ ràng buộc AES-GCM với người sở hữu. Nếu token cũ không đọc được thì bản mã vẫn được giữ trong bản sao; người dùng cần kết nối lại Google.
+- Trước khi thay đổi mỗi nhóm, lưu bản sao mã hóa của toàn bộ các bản ghi gốc (tài khoản, mật khẩu băm, SĐT, Sheet, token đã mã hóa) vào `pm_user_merge_archive`. Bản sao không có API công khai; giữ nguyên `TOKEN_ENCRYPTION_KEY` để còn đọc được. Các link xác nhận/khôi phục cũ được thu hồi khi gộp, cần yêu cầu link mới.
+- Không tự trao quyền cho mật khẩu chưa xác nhận: khi Google chứng minh quyền sở hữu email đó, vô hiệu hóa mật khẩu chưa xác nhận, thu hồi phiên/link cũ và cho phép chủ email thiết lập mật khẩu mới bằng email. Mật khẩu đã xác nhận vẫn hoạt động bình thường.
+- Gmail được kết nối để lấy đơn có thể khác email website; Gmail khác đó không được dùng để đăng nhập vào tài khoản chủ website chỉ vì đã kết nối lấy đơn.
+
+Kiểm thử PostgreSQL thật (WASM/PGlite) cho migration/rollback là tùy chọn, không thêm dependency vào runtime. Cài `@electric-sql/pglite` vào thư mục tạm, rồi đặt `IDENTITY_PG_MODULE` thành đường dẫn package và chạy `npm test`. Bộ kiểm thử mặc định vẫn kiểm tra migration, dữ liệu và xác thực bằng pg-mem; bài rollback PostgreSQL cần biến này và được bỏ qua nếu chưa cài engine kiểm thử. Ví dụ:
+
+```sh
+npm --cache /tmp/poshmark-npm-cache install --prefix /tmp/poshmark-pg-check --no-audit --no-fund @electric-sql/pglite
+IDENTITY_PG_MODULE=/tmp/poshmark-pg-check/node_modules/@electric-sql/pglite npm test
+```
+
 ## Vận hành
 
-Các bảng `pm_password_accounts`, `pm_account_actions` và `pm_mail_budget` được tạo thêm; không xóa users/token/phone cũ. Không đổi SESSION_SECRET hoặc TOKEN_ENCRYPTION_KEY để cài tính năng này. Quyền admin vẫn do ADMIN_EMAILS phía máy chủ, không phải checkbox/body mà người dùng gửi lên. Chưa xác nhận email thì không được admin, dù nhập trùng email admin trong form.
+Các bảng tài khoản/mailer được giữ. Bản sửa một email/một tài khoản bổ sung `pm_user_aliases` và `pm_user_merge_archive`, gộp bản ghi trùng trong một giao dịch khi khởi động rồi tạo unique index trên `lower(pm_users.email)`. Không đổi SESSION_SECRET hoặc TOKEN_ENCRYPTION_KEY để cài tính năng này. Quyền admin vẫn do ADMIN_EMAILS phía máy chủ, không phải checkbox/body mà người dùng gửi lên. Chưa xác nhận email thì không được admin, dù nhập trùng email admin trong form.
 
 Kiểm thử tự động dùng email giả lập; chưa gửi email Gmail thật hoặc kiểm tra Google/Render thật thay cho cấu hình của bạn. Điều khoản/chính sách hiển thị cần chủ website xem lại và bổ sung kênh liên hệ hỗ trợ trước khi mở đăng ký công khai.

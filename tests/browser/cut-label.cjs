@@ -1036,3 +1036,22 @@ test("account header opens the user's profile and keeps full phone numbers visib
     assert.equal(await phone.inputValue(), "+84901234567");
   }
 });
+
+test("a Google-claimed account can set a fresh password from its profile", async (t) => {
+  const page = await open(t, {
+    webMode: true,
+    signedIn: true,
+    account: { needsPasswordSetup: true },
+  });
+  await page.getByRole("button", { name: "Hồ sơ", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Thiết lập mật khẩu qua email", exact: true })
+    .click();
+  await page
+    .getByRole("heading", { name: "Quên mật khẩu?", exact: true })
+    .waitFor();
+  assert.equal(
+    await page.getByLabel("Email", { exact: true }).isVisible(),
+    true,
+  );
+});

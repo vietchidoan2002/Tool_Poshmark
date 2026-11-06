@@ -14,7 +14,7 @@ async function waitForMail(messages, count) {
 }
 const secret = "test-only-not-a-real-key-12345678901234567890";
 function database() {
-  const db = newDb();
+  const db = newDb({ noAstCoverageCheck: true });
   const locks = new Set();
   db.public.registerFunction({
     name: "to_timestamp",
@@ -183,11 +183,11 @@ test("two users have isolated Sheets and encrypted Google tokens; disconnect can
   await login(b, "B");
   assert.equal(
     (await (await a("/api/account")).json()).email,
-    "A@example.test",
+    "a@example.test",
   );
   assert.equal(
     (await (await b("/api/account")).json()).email,
-    "B@example.test",
+    "b@example.test",
   );
   for (const [client, id] of [
     [a, "a".repeat(24)],
@@ -384,7 +384,7 @@ test("phone format, ownership boundaries, duplicates, admin CRUD and stale edits
     await admin("/api/admin/phones?search=B%40example.test")
   ).json();
   assert.equal(list.users.length, 1);
-  assert.equal(list.users[0].email, "B@example.test");
+  assert.equal(list.users[0].email, "b@example.test");
   assert.equal(list.users[0].tokens, undefined);
   assert.equal(
     (
@@ -1003,7 +1003,7 @@ test("mail delivery failure never reports activation or logs a new account in", 
   assert.equal((await user("/api/logout", { method: "POST" })).status, 200);
 });
 
-test("admin Gmail bootstrap unlocks mail delivery without bypassing the password account email check", async (t) => {
+test("admin Gmail bootstrap reuses one account and revokes an unverified pre-registration password", async (t) => {
   const diagnostics = [];
   t.mock.method(console, "error", (message) => diagnostics.push(message));
   const messages = [];
@@ -1053,22 +1053,28 @@ test("admin Gmail bootstrap unlocks mail delivery without bypassing the password
   assert.equal((await user("/api/admin/phones")).status, 403);
   await user("/api/logout", { method: "POST" });
   await login(user, "Admin");
-  assert.notEqual(
-    (await (await user("/api/session")).json()).userId,
-    passwordId,
-    "Google login must not merge an unverified password account",
+  assert.equal((await (await user("/api/session")).json()).userId, passwordId);
+  assert.equal(
+    (await (await user("/api/account")).json()).needsPasswordSetup,
+    true,
   );
+  assert.equal((await pool.query("SELECT * FROM pm_users")).rows.length, 1);
   await user("/api/logout", { method: "POST" });
-  await user("/api/auth/login", { method: "POST", body: details });
   assert.equal(
-    (await (await user("/api/session")).json()).emailVerified,
-    false,
+    (await user("/api/auth/login", { method: "POST", body: details })).status,
+    401,
+    "the unverified password must not gain access to the Google owner's account",
   );
   assert.equal(
-    (await user("/api/auth/resend-verification", { method: "POST" })).status,
+    (
+      await user("/api/auth/forgot-password", {
+        method: "POST",
+        body: { email: details.email },
+      })
+    ).status,
     200,
   );
-  assert.equal(messages.length, 1);
+  await waitForMail(messages, 1);
   const raw = Buffer.from(messages[0].requestBody.raw, "base64url").toString();
   const text = Buffer.from(
     raw.split("\r\n\r\n")[1].replace(/\r\n/g, ""),
@@ -1076,13 +1082,30 @@ test("admin Gmail bootstrap unlocks mail delivery without bypassing the password
   ).toString();
   const token = new URL(text.split("\n")[1]).hash.split("token=")[1];
   assert.equal(
-    (await user("/api/auth/verify-email", { method: "POST", body: { token } }))
-      .status,
+    (
+      await user("/api/auth/reset-password", {
+        method: "POST",
+        body: {
+          token,
+          password: "new-trusted-password",
+          confirmPassword: "new-trusted-password",
+        },
+      })
+    ).status,
     200,
   );
-  const session = await (await user("/api/session")).json();
-  assert.equal(session.emailVerified, true);
-  assert.equal(session.userId, passwordId);
+  assert.equal(
+    (
+      await user("/api/auth/login", {
+        method: "POST",
+        body: { email: details.email, password: "new-trusted-password" },
+      })
+    ).status,
+    200,
+  );
+  const identity = await (await user("/api/session")).json();
+  assert.equal(identity.userId, passwordId);
+  assert.equal(identity.emailVerified, true);
 });
 
 test("OAuth callback explains failures at each stage without exposing codes, secrets or database details", async (t) => {
@@ -1286,4 +1309,174 @@ test("password recovery reports a busy mail queue instead of silently dropping r
     assert.match((await result.json()).error, /đang xử lý nhiều email/);
   }
   release();
+});
+
+test("Google and a verified password sign in to one email account without losing its phone or Sheet", async (t) => {
+  const messages = [];
+  const { browser, login, pool } = await fixture(t, undefined, {
+    sendEmail: async (message) => messages.push(message),
+  });
+  const user = browser();
+  const details = {
+    name: "Verified user",
+    email: "Verified@example.test",
+    phone: "0901234567",
+    password: "trusted-password",
+    confirmPassword: "trusted-password",
+    acceptTerms: true,
+  };
+  await user("/api/auth/register", { method: "POST", body: details });
+  await user("/api/auth/login", { method: "POST", body: details });
+  const original = (await (await user("/api/session")).json()).userId;
+  const token = new URL(messages[0].text.split("\n")[1]).hash.split(
+    "token=",
+  )[1];
+  await user("/api/auth/verify-email", { method: "POST", body: { token } });
+  await user("/api/config", {
+    method: "POST",
+    body: { sheetId: "saved-sheet-id-12345678901234" },
+  });
+  await user("/api/logout", { method: "POST" });
+  await login(user, "Verified");
+  assert.equal((await (await user("/api/session")).json()).userId, original);
+  assert.equal(
+    (await (await user("/api/profile")).json()).phone,
+    "+84901234567",
+  );
+  assert.equal(
+    (await (await user("/api/config")).json()).sheetId,
+    "saved-sheet-id-12345678901234",
+  );
+  assert.equal(
+    (await (await user("/api/account")).json()).needsPasswordSetup,
+    false,
+  );
+  assert.equal((await pool.query("SELECT * FROM pm_users")).rows.length, 1);
+  await user("/api/logout", { method: "POST" });
+  assert.equal(
+    (await user("/api/auth/login", { method: "POST", body: details })).status,
+    200,
+  );
+  assert.equal(
+    (
+      await user("/api/auth/register", {
+        method: "POST",
+        body: { ...details, email: "VERIFIED@example.test" },
+      })
+    ).status,
+    409,
+  );
+});
+
+test("Google claiming an unverified email revokes the old password, active sessions and pending links", async (t) => {
+  const messages = [];
+  const { browser, login, pool } = await fixture(t, undefined, {
+    sendEmail: async (message) => messages.push(message),
+  });
+  const attacker = browser(),
+    owner = browser();
+  const details = {
+    name: "Unverified signup",
+    email: "Victim@example.test",
+    phone: "0901234567",
+    password: "untrusted-password",
+    confirmPassword: "untrusted-password",
+    acceptTerms: true,
+  };
+  await attacker("/api/auth/register", { method: "POST", body: details });
+  await attacker("/api/auth/login", { method: "POST", body: details });
+  const original = (await (await attacker("/api/session")).json()).userId;
+  const oldToken = new URL(messages[0].text.split("\n")[1]).hash.split(
+    "token=",
+  )[1];
+  await login(owner, "Victim");
+  assert.equal((await (await owner("/api/session")).json()).userId, original);
+  assert.equal(
+    (await (await attacker("/api/session")).json()).authenticated,
+    false,
+  );
+  assert.equal(
+    (await attacker("/api/auth/login", { method: "POST", body: details }))
+      .status,
+    401,
+  );
+  assert.equal(
+    (
+      await owner("/api/auth/verify-email", {
+        method: "POST",
+        body: { token: oldToken },
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (await (await owner("/api/account")).json()).needsPasswordSetup,
+    true,
+  );
+  assert.equal((await pool.query("SELECT * FROM pm_users")).rows.length, 1);
+});
+
+test("connecting another mailbox does not turn that mailbox's Google login into the website owner", async (t) => {
+  const { browser, login, pool } = await fixture(t);
+  const owner = browser(),
+    other = browser();
+  await login(owner, "Owner");
+  await login(owner, "Mailbox");
+  assert.equal((await (await owner("/api/session")).json()).userId, "Owner");
+  await login(other, "Mailbox");
+  assert.equal((await (await other("/api/session")).json()).userId, "Mailbox");
+  assert.equal(
+    (await (await other("/api/account")).json()).email,
+    "mailbox@example.test",
+  );
+  assert.equal((await pool.query("SELECT * FROM pm_users")).rows.length, 2);
+  await owner("/api/logout", { method: "POST" });
+  await login(owner, "Owner");
+  assert.equal(
+    (await (await owner("/api/gmail/status")).json()).accounts[0].email,
+    "Mailbox@example.test",
+    "sign-in alone must preserve the selected processing mailbox",
+  );
+});
+
+test("legacy Google and password sessions must sign in again after their duplicate records merge", async (t) => {
+  const { browser, login, pool, store } = await fixture(t);
+  const googleSession = browser(),
+    passwordSession = browser();
+  await login(googleSession, "Old");
+  await pool.query("DROP INDEX pm_users_email_unique");
+  await pool.query(
+    "INSERT INTO pm_users(id,email) VALUES('pw:old','old@example.test')",
+  );
+  const { hashPassword } = require("../server/password-auth.cjs");
+  const hash = await hashPassword("existing-password");
+  await pool.query(
+    "INSERT INTO pm_password_accounts(user_id,email,display_name,password_hash,email_verified,terms_version) VALUES('pw:old','old@example.test','Old',$1,true,'test')",
+    [hash],
+  );
+  await passwordSession("/api/auth/login", {
+    method: "POST",
+    body: { email: "old@example.test", password: "existing-password" },
+  });
+  assert.equal(
+    (await (await passwordSession("/api/session")).json()).authenticated,
+    true,
+  );
+  const { initializeIdentities } = require("../server/user-identity.cjs");
+  await initializeIdentities(pool, store, { lockTables: false });
+  assert.equal(
+    (await (await googleSession("/api/session")).json()).authenticated,
+    false,
+  );
+  assert.equal(
+    (await (await passwordSession("/api/session")).json()).authenticated,
+    false,
+  );
+  await login(googleSession, "Old");
+  assert.equal(
+    (await (await googleSession("/api/session")).json()).userId,
+    "pw:old",
+  );
+  assert.equal((await (await googleSession("/api/profile")).json()).phone, "");
+  assert.equal((await pool.query("SELECT * FROM pm_users")).rows.length, 1);
 });

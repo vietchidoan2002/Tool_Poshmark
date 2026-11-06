@@ -856,7 +856,11 @@ function App() {
         </button>
       </nav>
       {page === "profile" && webMode && authenticated ? (
-        <UserProfile key={authUser.current} onEligibility={setPhoneReady} />
+        <UserProfile
+          key={authUser.current}
+          onEligibility={setPhoneReady}
+          onSetPassword={() => openAuth("forgot")}
+        />
       ) : page === "get" ? (
         <main className="panel">
           <div className="panelhead">
