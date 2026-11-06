@@ -6,6 +6,7 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createWorker } from "tesseract.js";
 import "./style.css";
 import UserProfile from "./UserProfile.jsx";
+import BrandLogo from "./BrandLogo.jsx";
 import AuthPage, { ActivationPage } from "./AuthPage.jsx";
 import {
   extractOrderId,
@@ -798,7 +799,7 @@ function App() {
       <header
         className={"top" + (webMode && authenticated ? " signed-in" : "")}
       >
-        <div className="logo">PM</div>
+        <BrandLogo />
         <div className="headcopy">
           <h1>Poshmark Label Manager</h1>
           <p>Đơn hàng gọn gàng. Label sẵn sàng.</p>

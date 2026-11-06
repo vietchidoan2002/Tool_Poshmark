@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import BrandLogo from "./BrandLogo.jsx";
 const titles = {
   login: "Đăng nhập",
   register: "Tạo tài khoản",
@@ -172,7 +173,7 @@ export default function AuthPage({
   return (
     <div className="auth-shell">
       <header className="top">
-        <div className="logo">PM</div>
+        <BrandLogo />
         <div className="headcopy">
           <h1>Poshmark Label Manager</h1>
           <p>Tài khoản của bạn. Dữ liệu của riêng bạn.</p>
@@ -466,7 +467,7 @@ export function ActivationPage({ onLogout, onRefresh, logoutError }) {
   return (
     <div className="auth-shell">
       <header className="top signed-in">
-        <div className="logo">PM</div>
+        <BrandLogo />
         <div className="headcopy">
           <h1>Poshmark Label Manager</h1>
           <p>Kích hoạt tài khoản để bắt đầu.</p>
