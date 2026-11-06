@@ -34,6 +34,12 @@ async function initializeIdentities(pool, store, { lockTables = true } = {}) {
       ),
     );
     const groups = new Map();
+    const hasRuns =
+      (
+        await client.query(
+          "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name='pm_get_runs'",
+        )
+      ).rows.length > 0;
     for (const user of users) {
       const key = normalizeEmail(user.email);
       if (!groups.has(key)) groups.set(key, []);
@@ -141,16 +147,35 @@ async function initializeIdentities(pool, store, { lockTables = true } = {}) {
             "UPDATE pm_phone_audit SET user_id=$1 WHERE user_id=$2",
             [target.id, user.id],
           );
+          if (hasRuns)
+            await client.query(
+              "UPDATE pm_get_runs SET user_id=$1 WHERE user_id=$2",
+              [target.id, user.id],
+            );
           await client.query("DELETE FROM pm_users WHERE id=$1", [user.id]);
         }
         await client.query(
-          "UPDATE pm_users SET email=$1,tokens=$2,sheet_id=$3,token_version=$4 WHERE id=$5",
+          "UPDATE pm_users SET email=$1,tokens=$2,sheet_id=$3,token_version=$4,session_version=$6,status=$7,deleted_at=$8,created_at=$9,last_seen_at=$10,display_name=$11 WHERE id=$5",
           [
             email,
             tokens,
             sheetId,
             Math.max(...group.map((user) => user.token_version)) + 1,
             target.id,
+            Math.max(...group.map((user) => user.session_version || 1)) + 1,
+            group.some((user) => user.status !== "active")
+              ? "suspended"
+              : "active",
+            group.find((user) => user.deleted_at)?.deleted_at || null,
+            group
+              .filter((user) => user.created_at)
+              .map((user) => user.created_at)
+              .sort((a, b) => new Date(a) - new Date(b))[0] || null,
+            group
+              .filter((user) => user.last_seen_at)
+              .map((user) => user.last_seen_at)
+              .sort((a, b) => new Date(b) - new Date(a))[0] || null,
+            target.display_name || password?.display_name || "",
           ],
         );
       } else if (group[0].email !== email) {
@@ -227,6 +252,11 @@ async function initializeIdentities(pool, store, { lockTables = true } = {}) {
         ).rows[0];
       }
       if (!user) throw Error("Google identity could not be claimed");
+      if (user.deleted_at || user.status !== "active")
+        throw Object.assign(new Error("Tài khoản đã bị khóa hoặc xóa."), {
+          code: "ACCOUNT_DISABLED",
+          status: 403,
+        });
       const password = (
         await client.query(
           "SELECT * FROM pm_password_accounts WHERE user_id=$1 FOR UPDATE",

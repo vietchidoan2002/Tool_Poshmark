@@ -142,16 +142,20 @@ async function createWebApp(config, deps = {}) {
   store.isVerified = passwordAuth.isVerified;
   app.get(
     "/api/session",
-    asyncRoute(async (req, res) =>
+    asyncRoute(async (req, res) => {
+      if (req.session.userId) await admin.usage.touch(req.session.userId);
       res.json({
         webMode: true,
         authenticated: !!req.session.userId,
         userId: req.session.userId || null,
+        isAdmin: req.session.userId
+          ? await admin.isAdmin(req.session.userId)
+          : false,
         emailVerified: req.session.userId
           ? await passwordAuth.isVerified(req.session.userId)
           : false,
-      }),
-    ),
+      });
+    }),
   );
   app.get(
     "/api/auth/start",
@@ -289,7 +293,11 @@ async function createWebApp(config, deps = {}) {
         await rotateSession(req);
         req.session.userId = ownerId;
         req.session.authVersion = account?.auth_version;
+        req.session.accountVersion = (
+          await store.get(ownerId)
+        )?.session_version;
         await saveSession(req);
+        await admin.usage.touch(ownerId);
       }
       res.redirect("/");
     }),
@@ -339,6 +347,8 @@ async function createWebApp(config, deps = {}) {
     store,
     await initializeIdentities(pool, store, { lockTables: !config.testing }),
   );
+  const { mountAdmin } = require("./admin.cjs");
+  const admin = await mountAdmin(app, pool, store, passwordAuth, config);
   app.get(
     "/api/config",
     asyncRoute(async (req, res) => {
@@ -423,7 +433,9 @@ async function createWebApp(config, deps = {}) {
         });
       const logs = [];
       const refreshWrites = [];
+      let runId, runStats;
       try {
+        runId = await admin.usage.start(user.id, accountName);
         const auth = oauth();
         const { pm_connected_email, ...googleCredentials } = store.decrypt(
           user.tokens,
@@ -443,16 +455,33 @@ async function createWebApp(config, deps = {}) {
           spreadsheetId: user.sheet_id,
           log: (level, message) => logs.push(`[${level}] ${message}`),
         });
+        runStats = stats;
         if ((await Promise.all(refreshWrites)).includes(false))
-          throw Error("Token persistence failed");
+          throw Object.assign(Error("Token persistence failed"), {
+            partialStats: stats,
+          });
+        await admin.usage.finish(runId, "success", stats);
         res.json({ ok: true, ...stats, output: logs.join("\n") });
       } catch (error) {
         await Promise.allSettled(refreshWrites);
+        const partialStats = error.partialStats || runStats || null;
+        if (runId)
+          try {
+            await admin.usage.finish(
+              runId,
+              partialStats?.writtenCount ? "partial" : "failed",
+              partialStats || {},
+            );
+          } catch {
+            console.error(
+              "[USAGE_WRITE_FAILED] Could not finalize Get Label statistics.",
+            );
+          }
         res.status(502).json({
           ok: false,
           error:
             "Chưa hoàn tất. Có thể cần kết nối lại Google hoặc thử lại sau. Các dòng đã ghi vẫn được giữ.",
-          partialStats: error.partialStats || null,
+          partialStats,
           output: logs.join("\n"),
         });
       } finally {

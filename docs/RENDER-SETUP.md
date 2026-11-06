@@ -101,3 +101,7 @@ Nên sửa qua giao diện để áp dụng chuẩn hóa, kiểm tra trùng và 
 ## Trang đăng nhập/đăng ký riêng
 
 Bản web có các form email/mật khẩu và vẫn có tùy chọn Google cho tài khoản cũ. Xem EMAIL-PASSWORD-AUTH.md. Để gửi xác nhận và khôi phục qua Gmail quản trị, đăng nhập Google bằng tài khoản trong ADMIN_EMAILS trước, rồi thêm AUTH_MAIL_PROVIDER=gmail và AUTH_MAIL_SENDER_EMAIL bằng email quản trị đã kết nối, deploy lại. Không cần đổi SESSION_SECRET hoặc TOKEN_ENCRYPTION_KEY. Chưa cấu hình gửi email thì các chức năng cần xác nhận email chưa sử dụng được; bản Static Site không có chức năng tài khoản này.
+
+## Dashboard quản trị
+
+Sau cập nhật, đăng nhập lại bằng Gmail đã khai báo trong ADMIN_EMAILS rồi bấm **Quản trị**, hoặc mở `/#/admin`. Không cần tạo thêm tài khoản trùng email hay đổi khóa. Hướng dẫn thêm/sửa/khóa/xóa/khôi phục và cách đọc số liệu: [ADMIN-DASHBOARD.md](ADMIN-DASHBOARD.md). Thống kê Get Label bắt đầu từ bản này; số liệu cũ trong Sheets không tự được cộng lại.

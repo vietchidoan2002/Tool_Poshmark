@@ -188,7 +188,7 @@ async function mountPhones(app, pool, users, config) {
           ? next()
           : res
               .status(403)
-              .json({ error: "Chỉ quản trị viên được quản lý số điện thoại." }),
+              .json({ error: "Chỉ quản trị viên được truy cập trang quản trị." }),
       )
       .catch(next),
   );

@@ -16,6 +16,16 @@ const secret = "test-only-not-a-real-key-12345678901234567890";
 function database() {
   const db = newDb({ noAstCoverageCheck: true });
   const locks = new Set();
+  db.public.registerOperator({
+    operator: "AT TIME ZONE",
+    left: DataType.timestamptz,
+    right: DataType.text,
+    returns: DataType.timestamp,
+    implementation: (value, zone) => {
+      assert.equal(zone, "Asia/Ho_Chi_Minh");
+      return new Date(value.getTime() + 7 * 3600000);
+    },
+  });
   db.public.registerFunction({
     name: "to_timestamp",
     args: [DataType.float],
@@ -1479,4 +1489,430 @@ test("legacy Google and password sessions must sign in again after their duplica
   );
   assert.equal((await (await googleSession("/api/profile")).json()).phone, "");
   assert.equal((await pool.query("SELECT * FROM pm_users")).rows.length, 1);
+});
+
+test("dashboard is admin-only, never exposes credentials and protects administrator accounts", async (t) => {
+  const { browser, login } = await fixture(t, undefined, {
+    adminEmails: "Admin@example.test",
+  });
+  const guest = browser(),
+    member = browser(),
+    admin = browser();
+  assert.equal((await guest("/api/admin/dashboard")).status, 401);
+  await login(member, "Member");
+  for (const path of ["/api/admin/dashboard", "/api/admin/users"])
+    assert.equal((await member(path)).status, 403);
+  assert.equal(
+    (
+      await member("/api/admin/users", {
+        method: "POST",
+        body: { role: "admin", email: "x@example.test" },
+      })
+    ).status,
+    403,
+  );
+  await login(admin, "Admin");
+  assert.equal((await (await admin("/api/session")).json()).isAdmin, true);
+  const summary = await admin("/api/admin/dashboard");
+  assert.equal(summary.status, 200);
+  const list = await (await admin("/api/admin/users")).json();
+  assert.equal(list.users.length, 2);
+  assert.ok(
+    !JSON.stringify(list).match(
+      /password_hash|refresh_token|access_token|test-refresh|test-secret/,
+    ),
+  );
+  const owner = list.users.find((user) => user.isAdmin);
+  assert.equal(
+    (
+      await admin("/api/admin/users/" + owner.id, {
+        method: "DELETE",
+        body: { version: owner.version },
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await admin("/api/admin/users/" + owner.id, {
+        method: "PUT",
+        body: {
+          version: owner.version,
+          phoneVersion: owner.phoneVersion,
+          name: "Admin",
+          phone: "",
+          status: "suspended",
+        },
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await admin("/api/admin/users", {
+        method: "POST",
+        body: {
+          name: "Other Admin",
+          email: "admin@example.test",
+          phone: "0901234567",
+        },
+      })
+    ).status,
+    403,
+  );
+  assert.equal((await admin("/api/admin/dashboard?days=1000")).status, 400);
+});
+
+test("admin account create/edit/suspend/delete/restore handles duplicates, sessions and stale phone edits", async (t) => {
+  const { browser, login, pool } = await fixture(t, undefined, {
+    adminEmails: "Admin@example.test",
+  });
+  const admin = browser(),
+    member = browser(),
+    oldSession = browser();
+  await login(admin, "Admin");
+  let response = await admin("/api/admin/users", {
+    method: "POST",
+    body: {
+      name: "New user",
+      email: "NEW@example.test",
+      phone: "0901234567",
+      sendInvite: false,
+    },
+  });
+  assert.equal(response.status, 201);
+  let user = (await response.json()).user;
+  const id = user.id;
+  assert.equal(user.email, "new@example.test");
+  assert.equal(user.emailVerified, false);
+  assert.equal(user.orders, 0);
+  assert.equal(
+    (
+      await admin("/api/admin/users", {
+        method: "POST",
+        body: {
+          name: "Duplicate",
+          email: "NEW@example.test",
+          phone: "0902345678",
+        },
+      })
+    ).status,
+    409,
+  );
+  assert.equal(
+    (
+      await admin("/api/admin/users", {
+        method: "POST",
+        body: { name: "Invalid", email: "invalid@example.test", phone: "123" },
+      })
+    ).status,
+    400,
+  );
+  await login(member, "New");
+  await login(oldSession, "New");
+  const memberProfile = await (await member("/api/profile")).json();
+  await member("/api/profile/phone", {
+    method: "PUT",
+    body: { phone: "0902345678", version: memberProfile.version },
+  });
+  response = await admin("/api/admin/users/" + id, {
+    method: "PUT",
+    body: {
+      name: "Changed",
+      email: user.email,
+      phone: user.phone,
+      status: "active",
+      version: user.version,
+      phoneVersion: user.phoneVersion,
+    },
+  });
+  assert.equal(response.status, 409);
+  user = (await (await admin("/api/admin/users/" + id)).json()).user;
+  response = await admin("/api/admin/users/" + id, {
+    method: "PUT",
+    body: {
+      name: "Updated",
+      email: user.email,
+      phone: user.phone,
+      status: "suspended",
+      version: user.version,
+      phoneVersion: user.phoneVersion,
+    },
+  });
+  assert.equal(response.status, 200);
+  user = (await response.json()).user;
+  assert.equal(
+    (await (await member("/api/session")).json()).authenticated,
+    false,
+  );
+  const start = await member("/api/auth/start");
+  const state = new URL(start.headers.get("location")).searchParams.get(
+    "state",
+  );
+  const denied = await member("/oauth2callback?state=" + state + "&code=New");
+  assert.equal(denied.status, 403);
+  assert.match(await denied.text(), /OAUTH_ACCOUNT_DISABLED/);
+  response = await admin("/api/admin/users/" + id, {
+    method: "PUT",
+    body: {
+      name: "Updated",
+      email: user.email,
+      phone: user.phone,
+      status: "active",
+      version: user.version,
+      phoneVersion: user.phoneVersion,
+    },
+  });
+  user = (await response.json()).user;
+  assert.equal(
+    (await (await oldSession("/api/session")).json()).authenticated,
+    false,
+    "unblocking does not revive old sessions",
+  );
+  assert.equal(
+    (
+      await admin("/api/admin/users/" + id, {
+        method: "PUT",
+        body: {
+          name: "Other",
+          email: "changed@example.test",
+          phone: user.phone,
+          status: "active",
+          version: user.version,
+          phoneVersion: user.phoneVersion,
+        },
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await admin("/api/admin/users/" + id, {
+        method: "DELETE",
+        body: { version: user.version - 1 },
+      })
+    ).status,
+    409,
+  );
+  assert.equal(
+    (
+      await admin("/api/admin/users/" + id, {
+        method: "DELETE",
+        body: { version: user.version },
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await (await admin("/api/admin/users")).json()).users.length,
+    1,
+  );
+  const deleted = (
+    await (await admin("/api/admin/users?status=deleted")).json()
+  ).users[0];
+  assert.equal(deleted.status, "deleted");
+  assert.equal(deleted.gmailCount, 0);
+  assert.equal(deleted.phone, "");
+  assert.equal(
+    (await admin("/api/admin/users/" + id + "/invite", { method: "POST" }))
+      .status,
+    409,
+  );
+  response = await admin("/api/admin/users/" + id + "/restore", {
+    method: "POST",
+    body: { version: deleted.version },
+  });
+  assert.equal(response.status, 200);
+  await login(member, "New");
+  assert.equal((await (await member("/api/session")).json()).userId, id);
+  const audit = (
+    await pool.query("SELECT action FROM pm_admin_audit")
+  ).rows.map((row) => row.action);
+  assert.deepEqual(audit, ["create", "update", "update", "delete", "restore"]);
+});
+
+test("dashboard records real Get Label counts including partial writes and counts distinct account names", async (t) => {
+  let calls = 0;
+  const { browser, login, pool } = await fixture(
+    t,
+    async () => {
+      calls++;
+      if (calls === 3)
+        throw Object.assign(Error("test partial failure"), {
+          partialStats: {
+            writtenCount: 3,
+            writtenOrderCount: 1,
+            skippedCount: 2,
+          },
+        });
+      return { writtenCount: 4, writtenOrderCount: 2, skippedCount: 1 };
+    },
+    { adminEmails: "Admin@example.test" },
+  );
+  const admin = browser(),
+    member = browser();
+  await login(admin, "Admin");
+  await login(member, "Member");
+  await member("/api/config", {
+    method: "POST",
+    body: { sheetId: "a".repeat(24) },
+  });
+  assert.equal(
+    (
+      await member("/api/get-label/run", {
+        method: "POST",
+        body: { accountName: "Bad", sheetName: "Orders", tokenFile: "wrong" },
+      })
+    ).status,
+    400,
+  );
+  assert.equal((await pool.query("SELECT * FROM pm_get_runs")).rows.length, 0);
+  for (const accountName of ["Shop One", "shop one", "Shop Two"])
+    await member("/api/get-label/run", {
+      method: "POST",
+      body: { accountName, sheetName: "Orders", tokenFile: "personal" },
+    });
+  const response = await admin("/api/admin/dashboard?days=30");
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.equal(data.usage.orders, 5);
+  assert.equal(data.usage.skipped, 4);
+  assert.equal(data.usage.getRuns, 3);
+  assert.equal(data.usage.successful, 2);
+  assert.equal(data.usage.failed, 1);
+  assert.equal(
+    data.trend.reduce((sum, row) => sum + row.orders, 0),
+    5,
+  );
+  assert.ok(data.trackingSince);
+  const members = (await (await admin("/api/admin/users?search=member")).json())
+    .users;
+  assert.equal(members.length, 1);
+  assert.equal(members[0].orders, 5);
+  assert.equal(members[0].poshmarkCount, 2);
+  assert.equal(members[0].gmailCount, 1);
+  const details = await (
+    await admin("/api/admin/users/" + members[0].id)
+  ).json();
+  assert.equal(details.accounts.length, 2);
+  assert.equal(details.runs.length, 3);
+  assert.ok(
+    details.runs.some((run) => run.status === "partial" && run.orders === 1),
+  );
+  assert.equal(
+    (
+      await admin("/api/admin/users/" + members[0].id, {
+        method: "DELETE",
+        body: { version: members[0].version },
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await (await admin("/api/admin/dashboard")).json()).usage.orders,
+    5,
+    "deleting a user preserves historical order totals",
+  );
+});
+
+test("admin changes wait for an in-progress import instead of disabling an account mid-write", async (t) => {
+  let release, entered;
+  const wait = new Promise((resolve) => (release = resolve)),
+    started = new Promise((resolve) => (entered = resolve));
+  t.after(() => release());
+  const { browser, login } = await fixture(
+    t,
+    async () => {
+      entered();
+      await wait;
+      return { writtenCount: 3, skippedCount: 0 };
+    },
+    { adminEmails: "Admin@example.test" },
+  );
+  const admin = browser(),
+    member = browser();
+  await login(admin, "Admin");
+  await login(member, "Member");
+  await member("/api/config", {
+    method: "POST",
+    body: { sheetId: "b".repeat(24) },
+  });
+  const running = member("/api/get-label/run", {
+    method: "POST",
+    body: { accountName: "Shop", sheetName: "Orders", tokenFile: "personal" },
+  });
+  await started;
+  const user = (await (await admin("/api/admin/users?search=member")).json())
+    .users[0];
+  assert.equal(
+    (
+      await admin("/api/admin/users/" + user.id, {
+        method: "DELETE",
+        body: { version: user.version },
+      })
+    ).status,
+    409,
+  );
+  assert.equal(
+    (
+      await admin("/api/admin/users/" + user.id, {
+        method: "PUT",
+        body: {
+          name: "Member",
+          phone: "",
+          status: "suspended",
+          version: user.version,
+          phoneVersion: user.phoneVersion,
+        },
+      })
+    ).status,
+    409,
+  );
+  release();
+  assert.equal((await running).status, 200);
+  assert.equal(
+    (await (await admin("/api/admin/dashboard")).json()).usage.orders,
+    3,
+  );
+});
+
+test("admin-created account survives invite failure and initial access requires email ownership", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const { browser, login, pool } = await fixture(t, undefined, {
+    adminEmails: "Admin@example.test",
+    sendEmail: async () => {
+      throw Error("fake-private-provider-error");
+    },
+  });
+  const admin = browser();
+  await login(admin, "Admin");
+  const result = await admin("/api/admin/users", {
+    method: "POST",
+    body: {
+      name: "Invited",
+      email: "invited@example.test",
+      phone: "0901234567",
+      sendInvite: true,
+    },
+  });
+  assert.equal(result.status, 201);
+  const body = await result.json();
+  assert.equal(body.mailSent, false);
+  assert.ok(body.mailError);
+  assert.ok(!JSON.stringify(body).includes("fake-private-provider-error"));
+  assert.equal(
+    (
+      await pool.query(
+        "SELECT * FROM pm_users WHERE email='invited@example.test'",
+      )
+    ).rows.length,
+    1,
+  );
+  const account = (
+    await pool.query("SELECT * FROM pm_password_accounts WHERE user_id=$1", [
+      body.user.id,
+    ])
+  ).rows[0];
+  assert.equal(account.terms_version, "admin-created");
+  assert.equal(account.email_verified, false);
 });

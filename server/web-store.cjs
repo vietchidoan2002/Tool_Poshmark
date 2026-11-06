@@ -34,6 +34,22 @@ async function createWebStore(pool, secret) {
     id text PRIMARY KEY, email text NOT NULL, tokens text, sheet_id text NOT NULL DEFAULT '',
     token_version integer NOT NULL DEFAULT 0
   )`);
+  // Legacy accounts have no reliable registration date; keep it unknown.
+  for (const definition of [
+    "display_name text NOT NULL DEFAULT ''",
+    "created_at timestamptz",
+    "last_seen_at timestamptz",
+    "status text NOT NULL DEFAULT 'active'",
+    "deleted_at timestamptz",
+    "profile_version integer NOT NULL DEFAULT 1",
+    "session_version integer NOT NULL DEFAULT 1",
+  ])
+    await pool.query(
+      "ALTER TABLE pm_users ADD COLUMN IF NOT EXISTS " + definition,
+    );
+  await pool.query(
+    "ALTER TABLE pm_users ALTER COLUMN created_at SET DEFAULT now()",
+  );
   return {
     async get(id) {
       return (await pool.query("SELECT * FROM pm_users WHERE id=$1", [id]))

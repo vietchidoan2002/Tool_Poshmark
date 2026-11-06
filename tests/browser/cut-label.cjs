@@ -89,6 +89,7 @@ async function open(t, options = {}) {
         return route.fulfill({
           json: {
             webMode: true,
+            isAdmin: !!options.phoneProfile?.isAdmin,
             authenticated: !!options.signedIn,
             userId: options.signedIn ? "test-user" : null,
             emailVerified:

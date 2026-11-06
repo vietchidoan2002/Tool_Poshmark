@@ -120,11 +120,18 @@ async function createAccountStore(pool) {
         ).rows[0]
       );
     },
-    async register(email, name, hash, phone) {
-      const client = await pool.connect();
+    async register(
+      email,
+      name,
+      hash,
+      phone,
+      termsVersion = "2026-11-v1",
+      providedClient,
+    ) {
+      const client = providedClient || (await pool.connect());
       const id = "pw:" + crypto.randomUUID();
       try {
-        await client.query("BEGIN");
+        if (!providedClient) await client.query("BEGIN");
         if (
           (
             await client.query(
@@ -149,22 +156,22 @@ async function createAccountStore(pool) {
             409,
             "Email hoặc số điện thoại đã được sử dụng. Hãy đăng nhập hoặc liên hệ quản trị viên.",
           );
-        await client.query("INSERT INTO pm_users(id,email) VALUES($1,$2)", [
-          id,
-          email,
-        ]);
+        await client.query(
+          "INSERT INTO pm_users(id,email,display_name) VALUES($1,$2,$3)",
+          [id, email, name],
+        );
         await client.query(
           "INSERT INTO pm_password_accounts(user_id,email,display_name,password_hash,terms_version) VALUES($1,$2,$3,$4,$5)",
-          [id, email, name, hash, "2026-11-v1"],
+          [id, email, name, hash, termsVersion],
         );
         await client.query(
           "INSERT INTO pm_phone_profiles(user_id,phone) VALUES($1,$2)",
           [id, phone],
         );
-        await client.query("COMMIT");
+        if (!providedClient) await client.query("COMMIT");
         return id;
       } catch (error) {
-        await client.query("ROLLBACK");
+        if (!providedClient) await client.query("ROLLBACK");
         if (error.code === "23505")
           throw fail(
             409,
@@ -172,7 +179,7 @@ async function createAccountStore(pool) {
           );
         throw error;
       } finally {
-        client.release();
+        if (!providedClient) client.release();
       }
     },
     async issue(id, purpose) {
@@ -439,20 +446,20 @@ async function mountPasswordAuth(app, pool, config, deps) {
   });
   async function checkSession(req) {
     if (!req.session.userId) return;
+    const state = (
+      await pool.query(
+        "SELECT u.id,u.status,u.deleted_at,u.session_version,p.auth_version FROM pm_users u LEFT JOIN pm_password_accounts p ON u.id=p.user_id WHERE u.id=$1",
+        [req.session.userId],
+      )
+    ).rows[0];
     if (
-      deps.userStore.resolveId &&
-      (await deps.userStore.resolveId(req.session.userId)) !==
-        req.session.userId
-    ) {
-      delete req.session.userId;
-      delete req.session.authVersion;
-      return;
-    }
-    const account = await accounts.get(req.session.userId);
-    if (
-      account &&
-      (req.session.authVersion !== account.auth_version ||
-        (req.session.authExpires && req.session.authExpires < Date.now()))
+      !state ||
+      state.deleted_at ||
+      state.status !== "active" ||
+      req.session.accountVersion !== state.session_version ||
+      (state.auth_version != null &&
+        req.session.authVersion !== state.auth_version) ||
+      (req.session.authExpires && req.session.authExpires < Date.now())
     ) {
       delete req.session.userId;
       delete req.session.authVersion;
@@ -465,6 +472,13 @@ async function mountPasswordAuth(app, pool, config, deps) {
     const account = await accounts.get(id);
     req.session.userId = id;
     req.session.authVersion = account?.auth_version;
+    req.session.accountVersion = (
+      await deps.userStore.get(id)
+    )?.session_version;
+    await pool.query(
+      "UPDATE pm_users SET last_seen_at=$1 WHERE id=$2 AND (last_seen_at IS NULL OR last_seen_at<$3)",
+      [new Date(), id, new Date(Date.now() - 5 * 60000)],
+    );
     req.session.authExpires =
       Date.now() + (remember ? 30 * 86400000 : 12 * 3600000);
     req.session.cookie.maxAge = remember ? 30 * 86400000 : null;
@@ -557,9 +571,13 @@ async function mountPasswordAuth(app, pool, config, deps) {
       if (password.length > 1024)
         throw fail(400, "Thông tin đăng nhập không hợp lệ.");
       const account = await accounts.byEmail(email);
+      const user = account ? await deps.userStore.get(account.user_id) : null;
       const valid = await checkPassword(password, account?.password_hash);
       if (
         !account ||
+        !user ||
+        user.deleted_at ||
+        user.status !== "active" ||
         !valid ||
         (account.locked_until && new Date(account.locked_until) > new Date())
       ) {
@@ -600,7 +618,15 @@ async function mountPasswordAuth(app, pool, config, deps) {
       ).rows[0];
       if (budget?.used >= 50) throw mailError("DAILY_LIMIT");
       const account = await accounts.recipient(email);
-      if (account) {
+      const recipientUser = account
+        ? await deps.userStore.get(account.user_id)
+        : null;
+      if (
+        account &&
+        recipientUser &&
+        !recipientUser.deleted_at &&
+        recipientUser.status === "active"
+      ) {
         // Return independently of the mail provider's latency, for both known and unknown emails.
         const task = sendAction(account, "reset", preparedSender).catch(
           () => {},
@@ -676,14 +702,12 @@ async function mountPasswordAuth(app, pool, config, deps) {
     wrap(async (req, res) => {
       if (!req.session.userId) throw fail(401, "Hãy đăng nhập.");
       const account = await accounts.get(req.session.userId);
-      const user = account
-        ? null
-        : await deps.userStore.get(req.session.userId);
+      const user = await deps.userStore.get(req.session.userId);
       res.json({
         passwordAccount: !!account,
         emailVerified: account ? account.email_verified : true,
         email: account?.email || user?.email || "",
-        name: account?.display_name || "",
+        name: user?.display_name || account?.display_name || "",
         needsPasswordSetup: account?.password_hash === DISABLED_PASSWORD,
         emailConfigured: !!sendEmail,
       });
@@ -696,6 +720,17 @@ async function mountPasswordAuth(app, pool, config, deps) {
     isVerified: async (id) => {
       const account = await accounts.get(id);
       return !account || account.email_verified;
+    },
+    sendSetupEmail: async (id) => {
+      if (!sendEmail)
+        throw fail(
+          503,
+          "Chưa cấu hình gửi email. Tài khoản đã tạo có thể đăng nhập bằng Google hoặc chờ quản trị viên bật gửi thư.",
+        );
+      await sendAction(
+        await accounts.recipient((await deps.userStore.get(id)).email),
+        "reset",
+      );
     },
   };
 }

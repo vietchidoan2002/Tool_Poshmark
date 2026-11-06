@@ -174,6 +174,11 @@ test(
       }),
     };
     const { store, phones } = await prepare(pool);
+    const { initializeUsage } = require("../server/admin.cjs");
+    await initializeUsage(pool);
+    await pool.query(
+      "INSERT INTO pm_get_runs(id,user_id,account_name,status,written_count) VALUES('before-merge','google-owner','Shop','success',3)",
+    );
     interrupt = true;
     await assert.rejects(
       initializeIdentities(pool, store),
@@ -190,6 +195,14 @@ test(
     const identities = await initializeIdentities(pool, store);
     assert.equal((await pool.query("SELECT * FROM pm_users")).rows.length, 1);
     assert.equal(await identities.resolveId("google-owner"), "pw:owner");
+    assert.equal(
+      (
+        await pool.query(
+          "SELECT user_id,written_count FROM pm_get_runs WHERE id='before-merge'",
+        )
+      ).rows[0].user_id,
+      "pw:owner",
+    );
     await initializeIdentities(pool, store);
     assert.equal(
       (await pool.query("SELECT * FROM pm_user_merge_archive")).rows.length,

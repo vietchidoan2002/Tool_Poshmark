@@ -24,6 +24,20 @@ import {
   imagePlacement,
 } from "./label-export.js";
 
+const AdminDashboard = React.lazy(() =>
+  import("./AdminDashboard.jsx").catch(() => ({
+    default: ({ onRetry, pending }) => (
+      <main className="panel">
+        <h2>Chưa mở được trang quản trị</h2>
+        <p>Kiểm tra kết nối hoặc tải lại phiên bản mới của website.</p>
+        <button onClick={onRetry} disabled={pending}>
+          Tải lại trang quản trị
+        </button>
+      </main>
+    ),
+  })),
+);
+
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
 let sharedPdfWorker;
@@ -194,6 +208,9 @@ function App() {
         );
       }
       setAuthView(route);
+      const appRoute = window.location.hash.replace(/^#\/?/, "").split("?")[0];
+      if (["get", "cut", "profile", "admin"].includes(appRoute))
+        setPage(appRoute);
     };
     change();
     window.addEventListener("hashchange", change);
@@ -215,9 +232,16 @@ function App() {
     openAuth(verifyPending.current ? "verify-email" : null);
     await refresh();
   }
-  const [page, setPage] = useState(PREVIEW_ONLY ? "cut" : "get");
+  const [page, setPage] = useState(
+    PREVIEW_ONLY ? "cut" : window.location.hash === "#/admin" ? "admin" : "get",
+  );
+  function navigatePage(value) {
+    setPage(value);
+    window.history.pushState(null, "", "#/" + value);
+  }
   const [webMode, setWebMode] = useState(PREVIEW_ONLY);
   const [authenticated, setAuthenticated] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [sessionReady, setSessionReady] = useState(PREVIEW_ONLY);
   const [emailVerified, setEmailVerified] = useState(false);
   const [authError, setAuthError] = useState("");
@@ -278,6 +302,7 @@ function App() {
       setAuthError("");
       setWebMode(!!session.webMode);
       setAuthenticated(!!session.authenticated);
+      setIsAdmin(!!session.authenticated && session.isAdmin === true);
       setEmailVerified(session.emailVerified === true);
       setSessionReady(true);
       if (session.webMode && authUser.current !== session.userId) {
@@ -780,13 +805,24 @@ function App() {
         </div>
         {webMode && authenticated && (
           <div className="header-account-actions">
+            {isAdmin && (
+              <button
+                className={
+                  page === "admin" ? "profile-link active" : "secondary"
+                }
+                onClick={() => navigatePage("admin")}
+                aria-pressed={page === "admin"}
+              >
+                Quản trị
+              </button>
+            )}
             <button
               className={
                 page === "profile"
                   ? "profile-link active"
                   : "secondary profile-link"
               }
-              onClick={() => setPage("profile")}
+              onClick={() => navigatePage("profile")}
               aria-pressed={page === "profile"}
             >
               Hồ sơ
@@ -844,18 +880,40 @@ function App() {
       <nav className="tabs">
         <button
           className={page === "get" ? "active" : ""}
-          onClick={() => setPage("get")}
+          onClick={() => navigatePage("get")}
         >
           ✉ Get Label
         </button>
         <button
           className={page === "cut" ? "active" : ""}
-          onClick={() => setPage("cut")}
+          onClick={() => navigatePage("cut")}
         >
           ▣ Cut Label
         </button>
       </nav>
-      {page === "profile" && webMode && authenticated ? (
+      {page === "admin" && webMode && authenticated ? (
+        isAdmin ? (
+          <React.Suspense
+            fallback={
+              <main className="panel">
+                <p role="status">Đang mở dashboard quản trị…</p>
+              </main>
+            }
+          >
+            <AdminDashboard
+              key={authUser.current}
+              onRetry={reloadVersion}
+              pending={getBusy || cutBusy}
+            />
+          </React.Suspense>
+        ) : (
+          <main className="panel">
+            <h2>Không có quyền quản trị</h2>
+            <p>Trang này chỉ dành cho quản trị viên.</p>
+            <button onClick={() => navigatePage("get")}>Về Get Label</button>
+          </main>
+        )
+      ) : page === "profile" && webMode && authenticated ? (
         <UserProfile
           key={authUser.current}
           onEligibility={setPhoneReady}
@@ -905,7 +963,7 @@ function App() {
                   Cần kiểm tra thông tin điện thoại trước khi chạy Get Label.{" "}
                   <button
                     className="text-button"
-                    onClick={() => setPage("profile")}
+                    onClick={() => navigatePage("profile")}
                   >
                     Mở Hồ sơ
                   </button>

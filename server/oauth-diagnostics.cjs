@@ -1,6 +1,10 @@
 // Provider errors may include OAuth codes/secrets and database connection URLs.
 // Select fixed messages only, for both the browser and server logs.
 const messages = {
+  ACCOUNT_DISABLED: [
+    403,
+    "Tài khoản này đã bị khóa hoặc xóa. Vui lòng liên hệ quản trị viên.",
+  ],
   CLIENT_CONFIG: [
     503,
     "GOOGLE_CLIENT_ID và GOOGLE_CLIENT_SECRET trên Render không khớp hoặc không còn hợp lệ. Chủ website cần lấy cả hai từ cùng một OAuth Web client, lưu trên Render rồi deploy lại.",
@@ -42,6 +46,7 @@ const messages = {
 function oauthDiagnostic(error, stage) {
   const providerCode = error?.response?.data?.error;
   let reason = Object.hasOwn(messages, stage) ? stage : "UNKNOWN";
+  if (error?.code === "ACCOUNT_DISABLED") reason = "ACCOUNT_DISABLED";
   if (
     [
       "invalid_client",

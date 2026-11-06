@@ -38,6 +38,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
     const log = options.log || logLine;
     const spreadsheetId = options.spreadsheetId || SPREADSHEET_ID;
     let writtenCount = 0;
+    let writtenOrderCount = 0;
     let skippedCount = 0;
     const gmail = options.gmail || google.gmail({ version: 'v1', auth });
     const sheets = options.sheets || google.sheets({ version: 'v4', auth });
@@ -86,7 +87,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
         
         if (!messages || messages.length === 0) {
             log("INFO", "Không có email mới cần xử lý.");
-            return { writtenCount, skippedCount };
+            return { writtenCount, writtenOrderCount, skippedCount };
         }
 
         log("INFO", `Tìm thấy ${messages.length} email chưa đọc.`);
@@ -271,6 +272,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                             resource: { valueInputOption: 'USER_ENTERED', data: dataToWrite }
                         }, requestOptions));
                         writtenCount += dataToWrite.length / 11;
+                        writtenOrderCount++;
                         existingOrderIds.add(orderId);
                         log("OK", `Đã ghi đơn ${orderId} vào Sheet.`);
                     }
@@ -284,10 +286,10 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
         }
         if (res.data.nextPageToken) log('INFO', 'Còn email chưa xử lý. Chạy lại để tiếp tục (tối đa 25 email mỗi lần).');
         log("OK", `Hoàn tất account ${manualAccountName} | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount}`);
-        return { writtenCount, skippedCount };
+        return { writtenCount, writtenOrderCount, skippedCount };
 
     } catch (error) {
-        error.partialStats = { writtenCount, skippedCount };
+        error.partialStats = { writtenCount, writtenOrderCount, skippedCount };
         log("ERROR", `Dừng xử lý | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount} | ${error.message}`);
         throw error;
     }
