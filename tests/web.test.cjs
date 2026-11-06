@@ -181,6 +181,14 @@ test("two users have isolated Sheets and encrypted Google tokens; disconnect can
     b = browser();
   await login(a, "A");
   await login(b, "B");
+  assert.equal(
+    (await (await a("/api/account")).json()).email,
+    "A@example.test",
+  );
+  assert.equal(
+    (await (await b("/api/account")).json()).email,
+    "B@example.test",
+  );
   for (const [client, id] of [
     [a, "a".repeat(24)],
     [b, "b".repeat(24)],

@@ -272,13 +272,7 @@ export default function AuthPage({
                     value={phone}
                     onChange={(event) => setPhone(event.target.value)}
                     disabled={busy}
-                    placeholder="0901234567 hoặc +84901234567"
-                    aria-describedby="registration-phone-help"
                   />
-                  <small id="registration-phone-help" className="hint">
-                    Nhập số đang sử dụng. Quản trị viên có thể liên hệ và kiểm
-                    tra sau.
-                  </small>
                 </label>
               )}
               {["login", "register", "reset-password"].includes(mode) &&
@@ -471,11 +465,16 @@ export function ActivationPage({ onLogout, onRefresh, logoutError }) {
   }
   return (
     <div className="auth-shell">
-      <header className="top">
+      <header className="top signed-in">
         <div className="logo">PM</div>
         <div className="headcopy">
           <h1>Poshmark Label Manager</h1>
           <p>Kích hoạt tài khoản để bắt đầu.</p>
+        </div>
+        <div className="header-account-actions">
+          <button className="secondary" onClick={onLogout}>
+            Đăng xuất
+          </button>
         </div>
       </header>
       <main className="auth-card" aria-labelledby="activation-title">
@@ -521,9 +520,6 @@ export function ActivationPage({ onLogout, onRefresh, logoutError }) {
             }}
           >
             Tôi đã xác nhận · Kiểm tra lại
-          </button>
-          <button className="text-button" onClick={onLogout}>
-            Đăng xuất
           </button>
         </div>
       </main>

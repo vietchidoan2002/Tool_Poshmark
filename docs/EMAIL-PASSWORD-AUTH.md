@@ -12,7 +12,9 @@ Mở URL gốc của Web Service sẽ hiện form đăng nhập. Phải đăng n
 
 ## Số điện thoại và hồ sơ
 
-Số điện thoại được thu ngay trong form đăng ký. Sau khi đăng nhập và xác nhận email, mở **Hồ sơ / Quản trị** để sửa số; quản trị viên có thể tìm, sửa, xóa, kiểm tra số. Get Label chỉ hiển thị cấu hình Gmail/Sheets, không chen form điện thoại.
+Nút **Hồ sơ** và **Đăng xuất** nằm ở góc phải phần đầu trang, trên cả máy tính và điện thoại. Hồ sơ hiển thị tên đã đăng ký, email tài khoản và số điện thoại đầy đủ; tài khoản Google cũ dùng đúng email Google, không để trống. Số không bị che và ô nhập không có chữ mẫu/đoạn lưu ý kỹ thuật. Quản trị viên vẫn có phần quản lý người dùng trong Hồ sơ.
+
+Số điện thoại được thu ngay trong form đăng ký. Sau khi đăng nhập và xác nhận email, mở **Hồ sơ** để sửa số; quản trị viên có thể tìm, sửa, xóa, kiểm tra số. Get Label chỉ hiển thị cấu hình Gmail/Sheets, không chen form điện thoại.
 
 Để kích hoạt bằng **email** và kiểm tra SĐT sau, đặt `REQUIRE_REVIEWED_PHONE=false` trong Render → Environment rồi deploy lại. Đổi blueprint không tự ghi đè biến đã nhập thủ công trong dịch vụ cũ. Đây cũng là mặc định của render.web.yaml mới. Nếu chủ website chủ động bật `true`, Get Label vẫn yêu cầu kiểm tra số thủ công; xác nhận email không thay thế bước đó. Không có SMS OTP và không xác minh SIM chính chủ.
 

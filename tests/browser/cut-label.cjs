@@ -107,7 +107,9 @@ async function open(t, options = {}) {
             passwordAccount: true,
             emailVerified: options.emailVerified !== false,
             email: "test@example.test",
+            name: "Người dùng thử",
             emailConfigured: true,
+            ...options.account,
           },
         });
       if (url.pathname === "/api/logout") {
@@ -617,9 +619,7 @@ test("signed-in users can save a phone without claiming SMS or SIM verification"
       phoneRequired: true,
     },
   });
-  await page
-    .getByRole("button", { name: "Hồ sơ / Quản trị", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Hồ sơ", exact: true }).click();
   await page
     .getByLabel("Số điện thoại của bạn", { exact: true })
     .fill("0901 234 567");
@@ -663,9 +663,7 @@ test("phone admin can list, edit, review and cancel or confirm deletion", async 
     },
     phoneUsers: users,
   });
-  await page
-    .getByRole("button", { name: "Hồ sơ / Quản trị", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Hồ sơ", exact: true }).click();
   await page
     .getByText("Quản trị · số điện thoại người dùng", { exact: true })
     .click();
@@ -889,9 +887,7 @@ test("registration collects phone, returns to sign-in and keeps tools locked unt
     await page.getByLabel("Số điện thoại của bạn", { exact: true }).count(),
     0,
   );
-  await page
-    .getByRole("button", { name: "Hồ sơ / Quản trị", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Hồ sơ", exact: true }).click();
   await page.getByLabel("Số điện thoại của bạn", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Đăng xuất", exact: true }).click();
   await page.getByRole("heading", { name: "Đăng nhập", exact: true }).waitFor();
@@ -972,4 +968,71 @@ test("logout protects unexported PDFs, reports failure and clears results after 
   });
   await page.getByRole("button", { name: /Cut Label/ }).click();
   assert.equal(await page.locator(".page").count(), 0);
+});
+
+test("account header opens the user's profile and keeps full phone numbers visible on desktop and mobile", async (t) => {
+  const page = await open(t, {
+    webMode: true,
+    signedIn: true,
+    account: { name: "Nguyễn Minh Anh", email: "minhanh@example.test" },
+    phoneProfile: {
+      phone: "+84901234567",
+      version: 1,
+      reviewed: false,
+      isAdmin: false,
+      phoneRequired: false,
+    },
+  });
+  const header = page.locator("header.top");
+  assert.equal(
+    await header
+      .getByRole("button", { name: "Đăng xuất", exact: true })
+      .isVisible(),
+    true,
+  );
+  await header.getByRole("button", { name: "Hồ sơ", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "Hồ sơ của bạn", exact: true })
+    .waitFor();
+  const identity = page.getByRole("region", { name: "Thông tin tài khoản" });
+  await identity
+    .getByRole("heading", { name: "Nguyễn Minh Anh", exact: true })
+    .waitFor();
+  assert.equal(
+    await identity.locator(".profile-identity p").textContent(),
+    "minhanh@example.test",
+  );
+  const phone = page.getByLabel("Số điện thoại của bạn", { exact: true });
+  assert.equal(await phone.inputValue(), "+84901234567");
+  assert.equal(await phone.getAttribute("type"), "tel");
+  assert.equal(await phone.getAttribute("placeholder"), null);
+  assert.equal(
+    await page
+      .getByText(/Chưa có SMS OTP|xác minh SIM|Số được kiểm tra định dạng/)
+      .count(),
+    0,
+  );
+  assert.equal(
+    await page.getByText("Chưa kiểm tra", { exact: true }).count(),
+    0,
+  );
+  for (const width of [1100, 375]) {
+    await page.setViewportSize({ width, height: 900 });
+    const button = await header
+      .getByRole("button", { name: "Đăng xuất", exact: true })
+      .boundingBox();
+    const bounds = await header.boundingBox();
+    assert.ok(
+      button.x + button.width >= bounds.x + bounds.width - 2,
+      "logout is aligned with the right edge of the header",
+    );
+    assert.ok(button.y <= bounds.y + 2, "logout sits at the top of the header");
+    assert.equal(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+      true,
+    );
+    assert.equal(await phone.inputValue(), "+84901234567");
+  }
 });

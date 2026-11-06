@@ -5,7 +5,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { createWorker } from "tesseract.js";
 import "./style.css";
-import PhoneManager from "./PhoneManager.jsx";
+import UserProfile from "./UserProfile.jsx";
 import AuthPage, { ActivationPage } from "./AuthPage.jsx";
 import {
   extractOrderId,
@@ -770,12 +770,36 @@ function App() {
     );
   return (
     <div className="app">
-      <header className="top">
+      <header
+        className={"top" + (webMode && authenticated ? " signed-in" : "")}
+      >
         <div className="logo">PM</div>
         <div className="headcopy">
           <h1>Poshmark Label Manager</h1>
           <p>Đơn hàng gọn gàng. Label sẵn sàng.</p>
         </div>
+        {webMode && authenticated && (
+          <div className="header-account-actions">
+            <button
+              className={
+                page === "profile"
+                  ? "profile-link active"
+                  : "secondary profile-link"
+              }
+              onClick={() => setPage("profile")}
+              aria-pressed={page === "profile"}
+            >
+              Hồ sơ
+            </button>
+            <button
+              className="secondary"
+              onClick={logout}
+              disabled={getBusy || cutBusy}
+            >
+              Đăng xuất
+            </button>
+          </div>
+        )}
         {!PREVIEW_ONLY && webMode && !authenticated && (
           <div className="account-actions">
             <button className="secondary" onClick={() => openAuth("login")}>
@@ -798,17 +822,6 @@ function App() {
             Thử lại kết nối
           </button>
         </aside>
-      )}
-      {webMode && authenticated && (
-        <div className="inlineActions">
-          <button
-            className="secondary"
-            onClick={logout}
-            disabled={getBusy || cutBusy}
-          >
-            Đăng xuất
-          </button>
-        </div>
       )}
       {updateAvailable && (
         <aside className="notice">
@@ -841,28 +854,9 @@ function App() {
         >
           ▣ Cut Label
         </button>
-        {webMode && authenticated && !PREVIEW_ONLY && (
-          <button
-            className={page === "profile" ? "active" : ""}
-            onClick={() => setPage("profile")}
-          >
-            Hồ sơ / Quản trị
-          </button>
-        )}
       </nav>
       {page === "profile" && webMode && authenticated ? (
-        <main className="panel">
-          <div className="panelhead">
-            <div>
-              <h2>Hồ sơ tài khoản</h2>
-              <p>
-                Cập nhật số điện thoại. Quản trị viên quản lý thông tin người
-                dùng tại đây.
-              </p>
-            </div>
-          </div>
-          <PhoneManager key={authUser.current} onEligibility={setPhoneReady} />
-        </main>
+        <UserProfile key={authUser.current} onEligibility={setPhoneReady} />
       ) : page === "get" ? (
         <main className="panel">
           <div className="panelhead">

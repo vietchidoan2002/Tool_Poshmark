@@ -87,7 +87,7 @@ Trong Environment của **Web Service** (không phải Static Site):
 Sau khi deploy:
 
 1. Đăng nhập bằng đúng email quản trị đã khai báo.
-2. Mở tab **Hồ sơ / Quản trị** → **Số điện thoại tài khoản**. Số đã nhập khi đăng ký sẽ có sẵn; tài khoản Google cũ có thể bổ sung số tại đây.
+2. Mở tab **Hồ sơ** → **Số điện thoại tài khoản**. Số đã nhập khi đăng ký sẽ có sẵn; tài khoản Google cũ có thể bổ sung số tại đây.
 3. Mở **Quản trị · số điện thoại người dùng** → **Tìm / tải danh sách**. Bạn có thể tìm email/số, thêm số vào tài khoản website hoặc Google, sửa, xóa, đánh dấu đã kiểm tra hoặc bỏ đánh dấu. Có phân trang để không tải toàn bộ danh sách.
 4. Khi bạn đã đối chiếu thủ công, chọn **Xác nhận đã kiểm tra thủ công**. Đổi số sẽ tự bỏ đánh dấu cũ. Xóa số cần xác nhận; nó không xóa tài khoản Google hay dữ liệu Sheets.
 5. Người dùng có thể nhập/chỉnh số của chính họ; không xem danh sách của người khác và không tự đánh dấu đã kiểm tra. Tải lại thông tin để nhận trạng thái mới.

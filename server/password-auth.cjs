@@ -666,10 +666,13 @@ async function mountPasswordAuth(app, pool, config, deps) {
     wrap(async (req, res) => {
       if (!req.session.userId) throw fail(401, "Hãy đăng nhập.");
       const account = await accounts.get(req.session.userId);
+      const user = account
+        ? null
+        : await deps.userStore.get(req.session.userId);
       res.json({
         passwordAccount: !!account,
         emailVerified: account ? account.email_verified : true,
-        email: account?.email || "",
+        email: account?.email || user?.email || "",
         name: account?.display_name || "",
         emailConfigured: !!sendEmail,
       });
