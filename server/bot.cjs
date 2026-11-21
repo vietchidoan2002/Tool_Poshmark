@@ -24,14 +24,11 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
     let writtenCount = 0;
     let writtenOrderCount = 0;
     let skippedCount = 0;
-    const prepareDrive = options.prepareDrive === true;
-    const labelBatches = options.includeLabels || prepareDrive ? [] : null;
-    const plannedOrders = [];
+    const labelBatches = options.includeLabels ? [] : null;
     const labelBudget = { bytes: MAX_PDF_BYTES, files: 0 };
     const stats = () => ({
         writtenCount, writtenOrderCount, skippedCount,
         ...(labelBatches ? { labelBatches } : {}),
-        ...(prepareDrive ? { plannedOrders } : {}),
     });
     const gmail = options.gmail || google.gmail({ version: 'v1', auth });
     const sheets = options.sheets || google.sheets({ version: 'v4', auth });
@@ -48,7 +45,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
         let targetRow = 2;
         let existingOrderIds = new Set(); 
 
-        if (!prepareDrive) try {
+        try {
             const response = await request(requestOptions => sheets.spreadsheets.values.get({
                 spreadsheetId,
                 range: `'${sheetName.replace(/'/g, "''")}'!H:H`,
@@ -75,11 +72,9 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
             throw sheetErr;
         }
 
-        const query = prepareDrive
-            ? 'is:unread {subject:"Your shipping labels are inside" (has:attachment filename:pdf {"Order Number" "Order Date"})}'
-            : labelBatches
-              ? 'is:unread {"Order Number" "Order Date" subject:"Your shipping labels are inside"}'
-              : 'is:unread {"Order Number" "Order Date"}';
+        const query = labelBatches
+            ? 'is:unread {"Order Number" "Order Date" subject:"Your shipping labels are inside"}'
+            : 'is:unread {"Order Number" "Order Date"}';
         const res = await request(requestOptions => gmail.users.messages.list({ userId: 'me', q: query, maxResults: 25 }, requestOptions));
         const messages = res.data.messages;
         
@@ -181,7 +176,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                         continue;
                     }
 
-                    if (attachments.length || prepareDrive)
+                    if (attachments.length)
                         labelOrders.push({ orderId, tracking: trackingInOrder(block) });
 
                     // ==========================================
@@ -247,43 +242,29 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                         items.push({ size: '', buyer: defaultBuyer });
                     }
 
-                    const dataToWrite = [];
-                    const plannedRows = [];
+                    let dataToWrite = [];
                     for (let k = 0; k < items.length; k++) {
                         const item = items[k];
                         const currentMockup = formatMockupUrl(allImages[currentImgIndex] || ""); 
                         currentImgIndex++;
 
-                        const values = {
-                            B: orderMonth,
-                            C: orderDateFmt,
-                            F: manualAccountName,
-                            G: item.buyer,
-                            H: orderId,
-                            J: "1",
-                            K: "T-shirt",
-                            L: item.size,
-                            O: earnings,
-                            R: orderId,
-                            W: currentMockup,
-                        };
-                        if (prepareDrive) {
-                            plannedRows.push(values);
-                        } else {
-                            for (const [column, value] of Object.entries(values))
-                                dataToWrite.push({
-                                    range: `'${sheetName.replace(/'/g, "''")}'!${column}${targetRow}`,
-                                    values: [[value]],
-                                });
-                            log("ORDER", `Đang ghi đơn ${orderId} | Buyer: ${item.buyer || "N/A"} | Size: ${item.size || "N/A"}`);
-                        }
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!B${targetRow}`, values: [[orderMonth]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!C${targetRow}`, values: [[orderDateFmt]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!F${targetRow}`, values: [[manualAccountName]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!G${targetRow}`, values: [[item.buyer]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!H${targetRow}`, values: [[orderId]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!J${targetRow}`, values: [["1"]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!K${targetRow}`, values: [["T-shirt"]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!L${targetRow}`, values: [[item.size]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!O${targetRow}`, values: [[earnings]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!R${targetRow}`, values: [[orderId]] });
+                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!W${targetRow}`, values: [[currentMockup]] });
+
+                        log("ORDER", `Đang ghi đơn ${orderId} | Buyer: ${item.buyer || "N/A"} | Size: ${item.size || "N/A"}`);
                         targetRow++;
                     }
 
-                    if (prepareDrive) {
-                        plannedOrders.push({ orderId, rows: plannedRows });
-                        existingOrderIds.add(orderId);
-                    } else if (dataToWrite.length > 0) {
+                    if (dataToWrite.length > 0) {
                         await request(requestOptions => sheets.spreadsheets.values.batchUpdate({
                             spreadsheetId,
                             resource: { valueInputOption: 'USER_ENTERED', data: dataToWrite }
@@ -296,22 +277,18 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                 }
             }
 
-            if (attachments.length || prepareDrive) {
-                const batch = await loadLabelBatch({
+            if (attachments.length) {
+                labelBatches.push(await loadLabelBatch({
                     gmail, request, messageId: msgId, parts: attachments, orders: labelOrders,
                     budget: labelBudget, canMarkRead,
-                });
-                if (prepareDrive && !attachments.length) batch.issues.push("Email thiếu PDF tem đính kèm.");
-                if (prepareDrive && !canMarkRead) batch.issues.push("Email có thông tin đơn thiếu hoặc không xác định được Order ID.");
-                labelBatches.push(batch);
+                }));
             } else if (canMarkRead) await request(requestOptions => gmail.users.messages.modify({
                 userId: 'me', id: msgId,
                 resource: { removeLabelIds: ['UNREAD'] }
             }, requestOptions));
         }
         if (res.data.nextPageToken) log('INFO', 'Còn email chưa xử lý. Chạy lại để tiếp tục (tối đa 25 email mỗi lần).');
-        if (!prepareDrive)
-            log("OK", `Hoàn tất account ${manualAccountName} | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount}`);
+        log("OK", `Hoàn tất account ${manualAccountName} | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount}`);
         return stats();
 
     } catch (error) {

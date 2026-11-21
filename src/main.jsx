@@ -517,15 +517,15 @@ function App() {
     setPendingDrive(null);
     setGmailLabels(current => ({ ...current, result }));
     setGetOutput(current => [current,
-      `Đã lưu ${result.linkedCount} tem và cập nhật cột R. Ghi mới ${result.writtenOrderCount} đơn.`,
+      `Đã gắn link cột R cho ${result.linkedCount} tem đã khớp.`,
       ...result.warnings,
     ].filter(Boolean).join("\n"));
   }
 
   async function runGet() {
     if (getBusy || cutBusy) return;
-    if (!accountName.trim() || !sheetName.trim() || !driveFolderUrl.trim() || !tokenFile) {
-      setGetOutput("Hãy nhập tên account, tên tab, link thư mục Drive và chọn Gmail.");
+    if (!accountName.trim() || !sheetName.trim() || !tokenFile) {
+      setGetOutput("Hãy nhập tên account, tên tab và chọn Gmail.");
       return;
     }
     if (pendingDrive && !window.confirm("Bắt đầu lượt mới và thay lượt lưu Drive đang chờ?")) return;
@@ -533,7 +533,7 @@ function App() {
     setGetBusy(true);
     setPendingDrive(null);
     setGmailLabels(null);
-    setGetOutput("Đang kiểm tra link Drive và đọc email…");
+    setGetOutput("Đang đọc email và ghi đơn vào Sheets…");
     try {
       const response = await fetch(API + "/api/get-label/prepare-drive", {
         method: "POST",
@@ -545,12 +545,15 @@ function App() {
       });
       const data = await response.json();
       if (authUser.current !== userId) return;
-      if (!response.ok) throw Error(data.error || "Chưa đọc được email.");
-      setGetOutput(data.output || "Không có email tem mới.");
+      if (!response.ok) {
+        setGetOutput([data.error || "Chưa đọc được email.", data.output].filter(Boolean).join("\n"));
+        return;
+      }
+      setGetOutput([data.output, ...(data.warnings || [])].filter(Boolean).join("\n") || "Không có email mới.");
       if (!data.labelBatches.length) return;
 
       const { prepareGmailLabels, encodeLabelFiles } = await import("./gmail-labels.js");
-      const { files, ...labels } = await prepareGmailLabels(data.labelBatches, {
+      const { files, completedBatches, ...labels } = await prepareGmailLabels(data.labelBatches, {
         openPdf: (pdf) => pdfjsLib.getDocument({ data: pdf, worker: getPdfWorker(), isEvalSupported: false }),
         renderPage,
         exportCanvas: exportLabelCanvas,
@@ -558,10 +561,11 @@ function App() {
       });
       if (authUser.current !== userId) return;
       setGmailLabels(labels);
-      if (labels.issues.length) return;
-      if (!data.token || !files.length)
-        throw Error("Chưa xác minh đủ tem cho tất cả đơn. Get Label đã dừng.");
-      const job = { token: data.token, files: encodeLabelFiles(files) };
+      if (!data.token || !files.length) return;
+      const allowed = new Map(data.allowedLabels.map(({ orderId, tracking }) => [orderId, tracking]));
+      const verified = files.filter(({ orderId, tracking }) => allowed.get(orderId) === tracking);
+      if (!verified.length) return;
+      const job = { token: data.token, files: encodeLabelFiles(verified), completedBatches };
       const size = job.files.reduce((total, file) => total + file.data.length, 0);
       if (size > Math.ceil(16 * 1024 * 1024 / 3) * 4 + 320)
         throw Error("Tổng PDF tem vượt 16 MB. Hãy chia nhỏ lượt chạy.");
@@ -1125,15 +1129,15 @@ function App() {
           <aside className="notice" role="note">
             <strong>Lưu ý</strong>
             <p>
-              Khi tất cả tem khớp tracking, Get Label lưu PDF và CSV vào Drive,
-              ghi link tem vào cột R rồi đánh dấu email đã đọc.
+              Get Label ghi đơn vào Sheets. Với mỗi tem khớp tracking, ứng dụng
+              lưu PDF vào thư mục Drive đã chọn và gắn link vào cột R.
             </p>
           </aside>
           <section className="runbox">
             <div>
               <h3>Chạy lấy đơn</h3>
               <p>
-                Kiểm tra tem trong email chưa đọc và ghi link tem vào tab
+                Lên đơn từ email chưa đọc và tự ghi link cho tem đã khớp vào tab
                 “{sheetName || "đã chọn"}”.
               </p>
             </div>
@@ -1146,7 +1150,6 @@ function App() {
                 !gmail.accounts?.length ||
                 !accountName.trim() ||
                 !sheetName.trim() ||
-                !driveFolderUrl.trim() ||
                 !tokenFile
               }
               onClick={runGet}
@@ -1159,7 +1162,7 @@ function App() {
             <section className="configbox">
               <h3>Tem từ Gmail</h3>
               <p>{gmailLabels.count} tem đã khớp tracking</p>
-              {gmailLabels.result && (
+              {gmailLabels.result?.csvUrl && (
                 <div className="inlineActions">
                   <a href={gmailLabels.result.folderUrl} target="_blank" rel="noreferrer">Mở thư mục Drive</a>
                   <a href={gmailLabels.result.csvUrl} target="_blank" rel="noreferrer">Mở file CSV</a>
@@ -1170,7 +1173,7 @@ function App() {
               )}
               {!!gmailLabels.issues.length && (
                 <>
-                  <p className="warning" role="alert">Đã dừng lượt chạy trước khi lưu Drive và ghi Sheets.</p>
+                  <p className="warning" role="alert">Các tem dưới đây cần kiểm tra trước khi gắn link.</p>
                   <details open>
                     <summary>Cần kiểm tra ({gmailLabels.issues.length})</summary>
                     <ul>{gmailLabels.issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul>

@@ -1053,7 +1053,7 @@ test("a Google-claimed account can set a fresh password from its profile", async
   );
 });
 
-test("Get Label pauses on a mismatched barcode and sends only a complete Drive batch", async (t) => {
+test("Get Label links matched pages while reporting the mismatched page", async (t) => {
   const { prepareZXingModule, writeBarcode } = await import("zxing-wasm/writer");
   prepareZXingModule({ overrides: {
     wasmBinary: await fs.readFile(require.resolve("zxing-wasm/writer/zxing_writer.wasm")),
@@ -1085,7 +1085,8 @@ test("Get Label pauses on a mismatched barcode and sends only a complete Drive b
   await page.route("**/api/get-label/prepare-drive", (route) => {
     assert.equal(route.request().postDataJSON().driveFolderUrl, folder);
     return route.fulfill({ json: {
-      token: "sealed-plan", output: "Prepared",
+      token: "sealed-plan", output: "Đã ghi đơn vào Sheets.", warnings: [],
+      allowedLabels: [{ orderId: ID, tracking: TRACKING }, { orderId: second, tracking: expected }],
       labelBatches: [{
         orders: [{ orderId: ID, tracking: TRACKING }, { orderId: second, tracking: expected }],
         files: [{ filename: "bundle.pdf", data }], issues: [],
@@ -1095,7 +1096,7 @@ test("Get Label pauses on a mismatched barcode and sends only a complete Drive b
   await page.route("**/api/get-label/finish-drive", (route) => {
     finished.push(route.request().postDataJSON());
     return route.fulfill({ json: {
-      linkedCount: 2, writtenOrderCount: 1, warnings: [],
+      linkedCount: finished.at(-1).files.length, warnings: [],
       folderUrl: folder, csvUrl: "https://drive.google.com/file/d/test-csv-file/view",
     } });
   });
@@ -1112,17 +1113,23 @@ test("Get Label pauses on a mismatched barcode and sends only a complete Drive b
   assert.match(issue, /bundle\.pdf · trang 1/);
   assert.ok(issue.includes("Tracking trên tem: " + mismatch));
   assert.ok(issue.includes("Order ID " + second + " (tracking trong email: " + expected + ")"));
-  assert.equal(finished.length, 0);
+  await page.getByRole("link", { name: "Mở file CSV" }).waitFor();
+  assert.equal(finished.length, 1);
+  assert.deepEqual(finished[0].completedBatches, []);
+  assert.deepEqual(finished[0].files.map(({ orderId, tracking, pageNo }) => [orderId, tracking, pageNo]), [
+    [ID, TRACKING, 2],
+  ]);
 
   data = await bundle(expected);
   await run.click();
   await page.getByRole("link", { name: "Mở file CSV" }).waitFor();
-  assert.equal(finished.length, 1);
-  assert.equal(finished[0].token, "sealed-plan");
-  assert.deepEqual(finished[0].files.map(({ orderId, tracking, pageNo }) => [orderId, tracking, pageNo]).sort(), [
+  assert.equal(finished.length, 2);
+  assert.equal(finished[1].token, "sealed-plan");
+  assert.deepEqual(finished[1].completedBatches, [0]);
+  assert.deepEqual(finished[1].files.map(({ orderId, tracking, pageNo }) => [orderId, tracking, pageNo]).sort(), [
     [ID, TRACKING, 2], [second, expected, 1],
   ]);
-  for (const file of finished[0].files)
+  for (const file of finished[1].files)
     await checkPdf(Buffer.from(file.data, "base64"));
   assert.equal(page.ocrCount, 0);
 });

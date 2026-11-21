@@ -24,6 +24,7 @@ export function encodeLabelFiles(files) {
 export async function prepareGmailLabels(batches, { openPdf, renderPage, exportCanvas, setStatus }) {
   const issues = [];
   const reviewFiles = [];
+  const completedBatches = [];
   const files = new Map();
   let scanned = 0;
 
@@ -132,8 +133,10 @@ export async function prepareGmailLabels(batches, { openPdf, renderPage, exportC
     if (batchIssues.length) {
       issues.push(...batchIssues.map(issue => `Email ${index + 1} · ${issue}`));
       reviewFiles.push(...batchFiles);
+    } else if (matches.size) {
+      completedBatches.push(index);
     }
   }
 
-  return { files: [...files.values()], count: files.size, issues, reviewFiles };
+  return { files: [...files.values()], count: files.size, issues, reviewFiles, completedBatches };
 }

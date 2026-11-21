@@ -12,7 +12,7 @@ const { createGoogleRequest } = require("./google-request.cjs");
 const { issueConfirmation, confirmedMessageId } = require("./gmail-labels.cjs");
 const {
   DRIVE_SCOPE, parseDriveFolder, checkDriveFolder, planOrders, readVerifiedFiles,
-  saveDriveFiles, sheetRows, writeDriveLinks,
+  saveDriveFiles, sheetRows, writeDriveLinks, completedMessages,
 } = require("./drive-label-import.cjs");
 const {
   oauthDiagnostic,
@@ -478,7 +478,7 @@ async function createWebApp(config, deps = {}) {
     const user = await store.get(req.session.userId);
     if (!user?.sheet_id || !user.tokens)
       throw Object.assign(Error(), {
-        status: 400, publicMessage: "Hãy kết nối Gmail, Drive và lưu Sheet ID trước.",
+        status: 400, publicMessage: "Hãy kết nối Gmail và lưu Sheet ID trước.",
       });
     return user;
   }
@@ -498,15 +498,16 @@ async function createWebApp(config, deps = {}) {
   app.post(
     "/api/get-label/prepare-drive",
     asyncRoute(async (req, res) => {
-      const folder = parseDriveFolder(req.body?.driveFolderUrl);
+      const driveLink = typeof req.body?.driveFolderUrl === "string" ? req.body.driveFolderUrl.trim() : "";
+      const folder = parseDriveFolder(driveLink);
       const accountName = String(req.body?.accountName || "").trim();
       const sheetName = String(req.body?.sheetName || "").trim();
-      if (!folder)
-        return res.status(400).json({ error: "Hãy nhập link thư mục Google Drive hợp lệ." });
       if (!accountName || accountName.length > 200 || !sheetName || sheetName.length > 100)
         return res.status(400).json({ error: "Hãy nhập tên account Poshmark và tên tab Sheets hợp lệ." });
       const refreshWrites = [];
-      let unlock;
+      const logs = [];
+      const warnings = [];
+      let unlock, runId, stats;
       try {
         const user = await driveImportUser(req);
         if (typeof req.body?.sheetId !== "string" || req.body.sheetId.trim() !== user.sheet_id)
@@ -515,36 +516,53 @@ async function createWebApp(config, deps = {}) {
         if (!unlock)
           return res.status(409).json({ error: "Tài khoản hoặc bảng tính đang xử lý đơn. Vui lòng chờ." });
         const auth = authorizeGmail(user, refreshWrites);
-        requireDriveScope(auth);
-        const request = deps.driveRequest || createGoogleRequest();
-        const target = await checkDriveFolder(driveClient(auth), folder, request);
         const run = deps.runOrders || require("./bot.cjs").processOrders;
-        const logs = [];
-        const stats = await run(auth, accountName, sheetName, {
-          spreadsheetId: user.sheet_id, prepareDrive: true, request,
+        runId = await admin.usage.start(user.id, accountName);
+        stats = await run(auth, accountName, sheetName, {
+          spreadsheetId: user.sheet_id, includeLabels: !!driveLink,
           log: (level, message) => logs.push(`[${level}] ${message}`),
         });
-        if ((await Promise.all(refreshWrites)).includes(false))
-          return res.status(502).json({ error: "Chưa lưu được token Google. Hãy thử lại." });
-        const orders = planOrders(stats);
+        await admin.usage.finish(runId, "success", stats);
+        const batches = stats.labelBatches || [];
+        const orders = planOrders(batches);
         let token = null;
-        if (orders) {
-          const plan = {
-            kind: "drive-label-import", expires: Date.now() + 60 * 60 * 1000,
-            tokenVersion: user.token_version, sheetId: user.sheet_id, accountName, sheetName,
-            folder, orders, messageIds: stats.labelBatches.map(batch => batch.messageId),
-          };
-          if (Buffer.byteLength(JSON.stringify(plan)) > 600 * 1024)
-            return res.status(413).json({ error: "Thông tin đơn trong lượt chạy quá lớn. Hãy chia nhỏ số email chưa đọc." });
-          token = store.encrypt(plan, user.id);
+        if (driveLink) {
+          try {
+            if (!folder) throw Error("Invalid Drive folder");
+            requireDriveScope(auth);
+            if (orders.length) {
+              await checkDriveFolder(driveClient(auth), folder, deps.driveRequest || createGoogleRequest());
+              const plan = {
+                kind: "drive-label-link", expires: Date.now() + 60 * 60 * 1000,
+                tokenVersion: user.token_version, sheetId: user.sheet_id, sheetName, folder, orders,
+                batches: batches.map(({ messageId, confirmable, orders }) => ({ messageId, confirmable, orders })),
+              };
+              if (Buffer.byteLength(JSON.stringify(plan)) > 600 * 1024)
+                warnings.push("Thông tin tem trong lượt chạy quá lớn. Hãy chia nhỏ số email chưa đọc.");
+              else token = store.encrypt(plan, user.id);
+            }
+          } catch (error) {
+            warnings.push(error.publicMessage ||
+              (folder ? "Chưa kết nối được thư mục Google Drive để lưu tem." : "Link thư mục Google Drive không hợp lệ."));
+          }
         }
+        if ((await Promise.all(refreshWrites)).includes(false))
+          warnings.push("Chưa lưu được token Google mới. Có thể cần kết nối lại lần sau.");
         return res.json({
-          token, folderUrl: target.webViewLink, output: logs.join("\n"),
-          labelBatches: stats.labelBatches.map(({ orders, files, issues }) => ({ orders, files, issues })),
+          token, output: logs.join("\n"), warnings,
+          allowedLabels: token ? orders : [],
+          labelBatches: batches.map(({ orders, files, issues }) => ({ orders, files, issues })),
         });
       } catch (error) {
         await Promise.allSettled(refreshWrites);
-        return driveError(res, error, "Chưa chuẩn bị được tem. Hãy kiểm tra quyền Google và thử lại.");
+        if (runId) {
+          const partial = error.partialStats || stats || {};
+          await admin.usage.finish(runId, partial.writtenCount ? "partial" : "failed", partial).catch(() => {});
+        }
+        return res.status(error.publicMessage ? error.status : 502).json({
+          error: error.publicMessage || "Lượt ghi đơn chưa hoàn tất. Các dòng đã ghi vẫn được giữ. Hãy xem log và thử lại.",
+          output: logs.join("\n"),
+        });
       } finally {
         if (unlock) await unlock();
       }
@@ -558,12 +576,12 @@ async function createWebApp(config, deps = {}) {
       if (typeof token !== "string" || token.length > 900 * 1024)
         return res.status(400).json({ error: "Lượt xử lý tem không hợp lệ." });
       const refreshWrites = [];
-      let unlock, runId, stats;
+      let unlock;
       try {
         const user = await driveImportUser(req);
         let plan;
         try { plan = store.decrypt(token, user.id); } catch { /* Rejected below. */ }
-        if (plan?.kind !== "drive-label-import" || plan.expires <= Date.now() ||
+        if (plan?.kind !== "drive-label-link" || plan.expires <= Date.now() ||
             plan.tokenVersion !== user.token_version || plan.sheetId !== user.sheet_id)
           return res.status(409).json({ error: "Lượt chạy đã hết hạn hoặc cấu hình Google đã thay đổi. Hãy chạy lại Get Label." });
         unlock = await store.lock(user.id, user.sheet_id);
@@ -576,31 +594,39 @@ async function createWebApp(config, deps = {}) {
         const request = deps.driveRequest || createGoogleRequest();
         const drive = driveClient(auth);
         const sheets = deps.driveSheetsFactory?.(auth) || google.sheets({ version: "v4", auth });
-        const gmail = deps.labelsGmailFactory?.(auth) || google.gmail({ version: "v1", auth });
-        const folder = await checkDriveFolder(drive, plan.folder, request);
         const rows = await sheetRows(sheets, plan, request);
-        runId = await admin.usage.start(user.id, plan.accountName);
-        const { links, csvUrl } = await saveDriveFiles({ drive, folder, files, userId: user.id, request });
-        stats = await writeDriveLinks(sheets, plan, rows, links, request);
-
         const warnings = [];
-        try {
-          await request(options => gmail.users.messages.batchModify({
-            userId: "me",
-            resource: { ids: plan.messageIds, removeLabelIds: ["UNREAD"] },
-          }, options));
-        } catch {
-          warnings.push("Đã lưu Drive và cột R nhưng Gmail chưa đánh dấu được thư đã đọc. Chạy lại sẽ dùng lại tệp đã lưu.");
+        const linkedFiles = files.filter(({ orderId, tracking }) => {
+          if (rows.existing.has(orderId)) return true;
+          warnings.push(`Order ID ${orderId} · tracking ${tracking}: chưa tìm thấy đơn trong cột H để gắn link.`);
+          return false;
+        });
+        if (!linkedFiles.length)
+          return res.json({ linkedCount: 0, warnings });
+
+        const folder = await checkDriveFolder(drive, plan.folder, request);
+        const { links, csvUrl } = await saveDriveFiles({
+          drive, folder, files: linkedFiles, userId: user.id, request,
+        });
+        await writeDriveLinks(sheets, plan, rows, links, request);
+
+        const readMessages = completedMessages(plan, req.body.completedBatches, linkedFiles);
+        if (readMessages.length) {
+          try {
+            const gmail = deps.labelsGmailFactory?.(auth) || google.gmail({ version: "v1", auth });
+            await request(options => gmail.users.messages.batchModify({
+              userId: "me", resource: { ids: readMessages, removeLabelIds: ["UNREAD"] },
+            }, options));
+          } catch {
+            warnings.push("Đã gắn link tem nhưng Gmail chưa đánh dấu được thư đã đọc. Chạy lại sẽ dùng lại tệp đã lưu.");
+          }
         }
         if ((await Promise.all(refreshWrites)).includes(false))
           warnings.push("Chưa lưu được token Google mới. Có thể cần kết nối lại lần sau.");
-        await admin.usage.finish(runId, "success", stats);
-        return res.json({ ...stats, csvUrl, folderUrl: folder.webViewLink, warnings });
+        return res.json({ linkedCount: links.size, csvUrl, folderUrl: folder.webViewLink, warnings });
       } catch (error) {
         await Promise.allSettled(refreshWrites);
-        if (runId)
-          await admin.usage.finish(runId, stats ? "partial" : "failed", stats || {}).catch(() => {});
-        return driveError(res, error, "Chưa hoàn tất lưu Drive hoặc cập nhật cột R. Hãy thử lại để dùng lại các tệp đã lưu.");
+        return driveError(res, error, "Chưa hoàn tất lưu tem hoặc cập nhật cột R. Hãy thử lại để dùng lại các tệp đã lưu.");
       } finally {
         if (unlock) await unlock();
       }

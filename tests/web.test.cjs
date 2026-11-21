@@ -1918,7 +1918,7 @@ test("admin-created account survives invite failure and initial access requires 
   assert.equal(account.email_verified, false);
 });
 
-test("Drive import validates the entire batch, stores separate PDFs and CSV, and updates R without duplicating orders", async (t) => {
+test("Get Label writes ordinary orders first and links only verified Drive PDFs in column R", async (t) => {
   const { PDFDocument } = require("pdf-lib");
   const { DRIVE_SCOPE } = require("../server/drive-label-import.cjs");
   const folderId = "folder-id-test";
@@ -1974,15 +1974,16 @@ test("Drive import validates the entire batch, stores separate PDFs and CSV, and
     },
   } } };
   const { browser, login, store } = await fixture(t, async (auth, account, sheet, options) => {
-    assert.equal(options.prepareDrive, true);
+    assert.equal(options.includeLabels, true);
     assert.equal(sheet, "My 'Orders'");
+    writes.push("orders");
+    const isNew = !idsInSheet.some(row => row[0] === second);
+    if (isNew) idsInSheet.push([second]);
     return {
-      plannedOrders: [
-        { orderId: first, rows: [{ H: first, R: first }] },
-        { orderId: second, rows: [{ H: second, R: second }] },
-      ],
+      writtenCount: Number(isNew), writtenOrderCount: Number(isNew), skippedCount: 1,
       labelBatches: [{
         messageId: "email-1", orders, issues: issue ? ["Tem chưa rõ"] : [], files: [],
+        confirmable: !issue,
       }],
     };
   }, {
@@ -2009,46 +2010,56 @@ test("Drive import validates the entire batch, stores separate PDFs and CSV, and
   const body = { accountName: "Store", sheetName: "My 'Orders'", sheetId,
     driveFolderUrl: "https://drive.google.com/drive/u/0/folders/" + folderId + "?resourcekey=resource-key" };
   const prepare = (input = body) => client("/api/get-label/prepare-drive", { method: "POST", body: input });
-  const finish = (token, files, actor = client) =>
-    actor("/api/get-label/finish-drive", { method: "POST", body: { token, files } });
+  const finish = (token, files, { actor = client, completedBatches = [] } = {}) =>
+    actor("/api/get-label/finish-drive", { method: "POST", body: { token, files, completedBatches } });
   assert.equal((await prepare({ ...body, sheetId: "unsaved-sheet-id" })).status, 409);
+  assert.deepEqual(writes, []);
+  const badFolder = await (await prepare({ ...body, driveFolderUrl: "https://example.test/invalid" })).json();
+  assert.equal(badFolder.token, null);
+  assert.match(badFolder.warnings[0], /Google Drive không hợp lệ/);
+  assert.deepEqual(writes, ["orders"]);
+
   issue = true;
   const flagged = await (await prepare()).json();
-  assert.equal(flagged.token, null);
-  assert.deepEqual(writes, []);
-  issue = false;
-  const prepared = await (await prepare()).json();
-  assert.ok(prepared.token);
-  assert.deepEqual(writes, []);
-
+  assert.ok(flagged.token, "a review issue must not block a verified PDF");
+  assert.deepEqual(flagged.allowedLabels, orders);
+  assert.deepEqual(writes, ["orders", "orders"]);
   const pdf = await PDFDocument.create();
   pdf.addPage([288, 432]);
   const data = Buffer.from(await pdf.save()).toString("base64");
   const files = orders.map((order, index) => ({ ...order, data, source: "bundle.pdf", pageNo: 2 - index }));
-  assert.equal((await finish(prepared.token, files, other)).status, 409);
-  assert.equal((await finish(prepared.token, [{ ...files[0], tracking: trackingB }, files[1]])).status, 400);
-  assert.deepEqual(writes, []);
+  assert.equal((await finish(flagged.token, [files[0]], { actor: other })).status, 409);
+  assert.equal((await finish(flagged.token, [{ ...files[0], tracking: trackingB }])).status, 400);
+  assert.deepEqual(writes, ["orders", "orders"]);
 
-  const result = await finish(prepared.token, files);
-  assert.equal(result.status, 200);
-  const payload = await result.json();
-  assert.equal(payload.writtenOrderCount, 1);
-  assert.equal(payload.linkedCount, 2);
-  assert.deepEqual(writes, ["drive:application/pdf", "drive:application/pdf", "drive:text/csv", "sheet", "gmail"]);
-  assert.deepEqual([...saved.values()].map(f => f.mimeType), ["application/pdf", "application/pdf", "text/csv"]);
-  assert.equal(saved.get("new-file-1").name, first + ".pdf");
-  const csv = saved.get("new-file-3");
-  assert.match(csv.bytes.toString("utf8"), /"bundle.pdf","2","abcdef0123456789abcdef01"/);
-  assert.ok(csv.bytes.toString("utf8").includes("https://drive.google.com/file/d/new-file-2/view"));
-  assert.equal(payload.csvUrl, csv.webViewLink);
-  assert.deepEqual(sheetWrites[0].filter(row => /!R\d+$/.test(row.range)).map(row => [row.range, row.values[0][0]]), [
+  const partial = await finish(flagged.token, [files[0]], { completedBatches: [0] });
+  assert.equal(partial.status, 200);
+  assert.equal((await partial.json()).linkedCount, 1);
+  assert.deepEqual(writes, ["orders", "orders", "drive:application/pdf", "drive:text/csv", "sheet"]);
+  assert.deepEqual(sheetWrites[0].map(row => [row.range, row.values[0][0]]), [
     ["'My ''Orders'''!R2", saved.get("new-file-1").webViewLink],
     ["'My ''Orders'''!R3", saved.get("new-file-1").webViewLink],
-    ["'My ''Orders'''!R4", saved.get("new-file-2").webViewLink],
   ]);
 
-  const retry = await finish(prepared.token, files);
-  assert.equal(retry.status, 200);
-  assert.equal((await retry.json()).writtenOrderCount, 0);
-  assert.equal(saved.size, 3);
+  issue = false;
+  const prepared = await (await prepare()).json();
+  const complete = await finish(prepared.token, files, { completedBatches: [0] });
+  assert.equal(complete.status, 200);
+  const payload = await complete.json();
+  assert.equal(payload.linkedCount, 2);
+  assert.deepEqual(writes.slice(5), ["orders", "drive:application/pdf", "drive:text/csv", "sheet", "gmail"]);
+  assert.deepEqual([...saved.values()].map(f => f.mimeType), ["application/pdf", "text/csv", "application/pdf", "text/csv"]);
+  assert.equal(saved.get("new-file-1").name, first + ".pdf");
+  const csv = saved.get("new-file-4");
+  assert.match(csv.bytes.toString("utf8"), /"bundle.pdf","2","abcdef0123456789abcdef01"/);
+  assert.ok(csv.bytes.toString("utf8").includes(saved.get("new-file-3").webViewLink));
+  assert.equal(payload.csvUrl, csv.webViewLink);
+  assert.deepEqual(sheetWrites[1].map(row => [row.range, row.values[0][0]]), [
+    ["'My ''Orders'''!R2", saved.get("new-file-1").webViewLink],
+    ["'My ''Orders'''!R3", saved.get("new-file-1").webViewLink],
+    ["'My ''Orders'''!R4", saved.get("new-file-3").webViewLink],
+  ]);
+  assert.equal((await finish(prepared.token, files)).status, 200);
+  assert.equal(saved.size, 4);
+  assert.equal(idsInSheet.length, 4);
 });

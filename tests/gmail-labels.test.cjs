@@ -63,29 +63,52 @@ test("Gmail confirmation is bound to the account, Gmail connection and expiratio
   assert.equal(confirmedMessageId(secret, user, token, 3601000), null);
 });
 
-test("preparing a Drive batch reads emails and attachments without marking read or touching Sheets", async () => {
+test("collecting labels keeps ordinary order writes even when emails have no usable label", async () => {
   const pdf = Buffer.from("%PDF-1.4\nfixture");
+  const marked = [];
+  const written = [];
   const gmail = { users: { messages: {
-    list: async () => ({ data: { messages: [{ id: "mail-ready" }, { id: "mail-needs-review" }] } }),
-    get: async ({ id }) => ({ data: { payload: { mimeType: "multipart/mixed", parts: [
-      { mimeType: "text/plain", body: { data: Buffer.from(
-        `Order Number ${id === "mail-ready" ? first : second}\nTracking Number: ${id === "mail-ready" ? trackingA : trackingB}`,
-      ).toString("base64url") } },
-      ...(id === "mail-ready"
-        ? [{ mimeType: "application/pdf", filename: "label.pdf", body: { data: pdf.toString("base64url") } }]
-        : []),
-    ] } } }),
-    modify: async () => assert.fail("A preflight must not change Gmail"),
+    list: async () => ({ data: { messages: [
+      { id: "mail-with-tem" }, { id: "mail-without-tem" }, { id: "irrelevant" },
+    ] } }),
+    get: async ({ id }) => {
+      const text = id === "mail-with-tem"
+        ? `Order Number ${first}\nTracking Number: ${trackingA}\nOrder Number means your order reference`
+        : id === "mail-without-tem" ? `Order Number ${second}` : "Newsletter";
+      return { data: { payload: { mimeType: "multipart/mixed", parts: [
+        { mimeType: "text/plain", body: { data: Buffer.from(text).toString("base64url") } },
+        ...(id === "mail-with-tem"
+          ? [{ mimeType: "application/pdf", filename: "label.pdf", body: { data: pdf.toString("base64url") } }]
+          : []),
+      ] } } };
+    },
+    modify: async ({ id }) => { marked.push(id); },
   } } };
   const sheets = { spreadsheets: { values: {
-    get: async () => assert.fail("A preflight must not need Sheets"),
-    batchUpdate: async () => assert.fail("A preflight must not write Sheets"),
+    get: async () => ({ data: { values: [["ID Order"]] } }),
+    batchUpdate: async ({ resource }) => {
+      written.push(...resource.data.filter(cell => /!H\d+$/.test(cell.range)).map(cell => cell.values[0][0]));
+    },
   } } };
   const report = await processOrders(null, "Shop", "Orders", {
-    gmail, sheets, prepareDrive: true, request: fn => fn({}), log: () => {},
+    gmail, sheets, includeLabels: true, request: fn => fn({}), log: () => {},
   });
-  assert.equal(report.writtenCount, 0);
-  assert.deepEqual(report.plannedOrders.map(order => order.orderId), [first, second]);
-  assert.equal(report.labelBatches[0].files.length, 1);
-  assert.match(report.labelBatches[1].issues[0], /thiếu PDF/);
+  assert.equal(report.writtenCount, 2);
+  assert.deepEqual(written, [first, second]);
+  assert.deepEqual(marked, ["mail-without-tem"]);
+  assert.equal(report.labelBatches.length, 1);
+  assert.equal(report.labelBatches[0].confirmable, false);
+  assert.deepEqual(report.labelBatches[0].orders, [{ orderId: first, tracking: trackingA }]);
+});
+
+test("a cross-email tracking conflict does not block unrelated matched labels", () => {
+  const { planOrders } = require("../server/drive-label-import.cjs");
+  const third = "abcdef0123456789abcdef03";
+  const batches = [
+    { issues: [], orders: [{ orderId: first, tracking: trackingA }, { orderId: third, tracking: trackingB }] },
+    { issues: [], orders: [{ orderId: second, tracking: trackingA }] },
+  ];
+  assert.deepEqual(planOrders(batches), [{ orderId: third, tracking: trackingB }]);
+  assert.match(batches[0].issues[0], /trùng giữa các Order ID/);
+  assert.ok(batches[1].issues[0].includes(second));
 });

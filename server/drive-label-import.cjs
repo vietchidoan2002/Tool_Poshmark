@@ -57,33 +57,41 @@ async function checkDriveFolder(drive, folder, request) {
   };
 }
 
-function planOrders(stats) {
+function planOrders(batches) {
   const byOrder = new Map();
   const byTracking = new Map();
-  for (const batch of stats.labelBatches) {
+  for (const batch of batches) {
     for (const { orderId, tracking } of batch.orders) {
-      if (!tracking) {
-        batch.issues.push(`Order ID ${orderId} · tracking trong email: chưa xác định.`);
-      } else if (byOrder.has(orderId) && byOrder.get(orderId) !== tracking) {
-        batch.issues.push(`Order ID ${orderId} có hai tracking: ${byOrder.get(orderId)} và ${tracking}.`);
-      } else if (byTracking.has(tracking) && byTracking.get(tracking) !== orderId) {
-        batch.issues.push(`Tracking ${tracking} trùng giữa Order ID ${byTracking.get(tracking)} và ${orderId}.`);
-      } else {
-        byOrder.set(orderId, tracking);
-        byTracking.set(tracking, orderId);
-      }
+      if (!tracking) continue;
+      if (!byOrder.has(orderId)) byOrder.set(orderId, new Set());
+      if (!byTracking.has(tracking)) byTracking.set(tracking, new Set());
+      byOrder.get(orderId).add(tracking);
+      byTracking.get(tracking).add(orderId);
     }
   }
-  if (!stats.plannedOrders.length || stats.labelBatches.some(batch => batch.issues.length))
-    return null;
-  if (stats.plannedOrders.length > MAX_LABELS)
-    throw fail(413, `Lượt này có hơn ${MAX_LABELS} đơn. Hãy chia nhỏ số email chưa đọc.`);
-  return stats.plannedOrders.map(order => ({ ...order, tracking: byOrder.get(order.orderId) }));
+  const allowed = new Map();
+  for (const [orderId, trackings] of byOrder) {
+    const [tracking] = trackings;
+    if (trackings.size === 1 && byTracking.get(tracking).size === 1)
+      allowed.set(orderId, tracking);
+  }
+  for (const batch of batches) {
+    for (const { orderId, tracking } of batch.orders) {
+      if (!tracking || allowed.has(orderId)) continue;
+      const trackings = byOrder.get(orderId);
+      const orders = byTracking.get(tracking);
+      if (trackings.size > 1)
+        batch.issues.push(`Order ID ${orderId} có nhiều tracking: ${[...trackings].join(", ")}.`);
+      else
+        batch.issues.push(`Tracking ${tracking} trùng giữa các Order ID: ${[...orders].join(", ")}.`);
+    }
+  }
+  return [...allowed].map(([orderId, tracking]) => ({ orderId, tracking }));
 }
 
 async function readVerifiedFiles(input, orders) {
-  if (!Array.isArray(input) || input.length !== orders.length || input.length > MAX_LABELS)
-    throw fail(400, "Cần đủ tem đã xác nhận cho tất cả Order ID trong lượt chạy.");
+  if (!Array.isArray(input) || !input.length || input.length > MAX_LABELS)
+    throw fail(400, "Danh sách tem đã xác nhận không hợp lệ.");
   const expected = new Map(orders.map(order => [order.orderId, order.tracking]));
   const seen = new Set();
   const files = [];
@@ -198,47 +206,38 @@ async function sheetRows(sheets, plan, request) {
     spreadsheetId: plan.sheetId, range: sheet + "H:H",
   }, options));
   const existing = new Map();
-  let next = 2;
   for (const [index, row] of (data.values || []).entries()) {
     const id = String(row[0] || "").trim().toLowerCase();
     if (!id || id === "id order") continue;
     if (!existing.has(id)) existing.set(id, []);
     existing.get(id).push(index + 1);
-    next = Math.max(next, index + 2);
   }
-  return { sheet, existing, next };
+  return { sheet, existing };
 }
 
 async function writeDriveLinks(sheets, plan, rows, links, request) {
   const data = [];
-  let { next } = rows;
-  let writtenCount = 0, writtenOrderCount = 0, skippedCount = 0;
-  for (const { orderId, rows: items } of plan.orders) {
-    const url = links.get(orderId);
-    if (!url) throw Error("Missing Drive link");
-    const existing = rows.existing.get(orderId);
-    if (existing) {
-      for (const row of existing)
-        data.push({ range: `${rows.sheet}R${row}`, values: [[url]] });
-      skippedCount++;
-      continue;
-    }
-    for (const item of items) {
-      for (const [column, value] of Object.entries({ ...item, R: url }))
-        data.push({ range: `${rows.sheet}${column}${next}`, values: [[value]] });
-      next++;
-      writtenCount++;
-    }
-    writtenOrderCount++;
-  }
+  for (const [orderId, url] of links)
+    for (const row of rows.existing.get(orderId) || [])
+      data.push({ range: `${rows.sheet}R${row}`, values: [[url]] });
   if (data.length) await request(options => sheets.spreadsheets.values.batchUpdate({
     spreadsheetId: plan.sheetId,
     resource: { valueInputOption: "USER_ENTERED", data },
   }, options));
-  return { writtenCount, writtenOrderCount, skippedCount, linkedCount: plan.orders.length };
+}
+
+function completedMessages(plan, completedBatches, files) {
+  const linked = new Map(files.map(({ orderId, tracking }) => [orderId, tracking]));
+  const indexes = new Set(Array.isArray(completedBatches) ? completedBatches : []);
+  return plan.batches.flatMap((batch, index) =>
+    indexes.has(index) && batch.confirmable && batch.orders.length &&
+    batch.orders.every(({ orderId, tracking }) => tracking && linked.get(orderId) === tracking)
+      ? [batch.messageId]
+      : [],
+  );
 }
 
 module.exports = {
   DRIVE_SCOPE, MAX_UPLOAD_BYTES, parseDriveFolder, checkDriveFolder, planOrders,
-  readVerifiedFiles, saveDriveFiles, sheetRows, writeDriveLinks,
+  readVerifiedFiles, saveDriveFiles, sheetRows, writeDriveLinks, completedMessages,
 };
