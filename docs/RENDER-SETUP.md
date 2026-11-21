@@ -11,10 +11,12 @@ Website chạy trên Render Web Service gói **Free** và PostgreSQL gói **Free
 
 ## 2. Tạo OAuth client cho web
 
-- Vào https://console.cloud.google.com/, tạo/chọn project; bật **Gmail API** và **Google Sheets API**.
+- Vào https://console.cloud.google.com/, tạo/chọn project; bật **Gmail API**, **Google Sheets API** và **Google Drive API**.
 - Trong Google Auth Platform/OAuth consent, chọn External nếu có người ngoài tổ chức. Để Testing trước và thêm email của từng người thử vào **Test users**.
 - Tạo OAuth client loại **Web application**, không dùng Desktop client cũ.
 - Lưu Client ID và Client secret trong Environment của Render bằng các tên bên dưới. Không gửi secret/token qua chat.
+
+Sau khi deploy, chọn **Kết nối / làm mới Gmail & Drive** và cấp quyền Drive. Nhập link thư mục mà tài khoản Google đang kết nối có quyền thêm tệp. Get Label lưu PDF và CSV vào thư mục đó và ghi link PDF vào cột R.
 
 ## 3. Tạo Render Web Service Free
 

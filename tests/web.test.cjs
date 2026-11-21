@@ -117,6 +117,7 @@ async function fixture(t, runOrders, options = {}) {
       runOrders,
       ...(options.sendEmail ? { sendEmail: options.sendEmail } : {}),
       ...(options.gmailFactory ? { gmailFactory: options.gmailFactory } : {}),
+      ...options.driveServices,
     },
   );
   const server = app.listen(0, "127.0.0.1");
@@ -1915,4 +1916,139 @@ test("admin-created account survives invite failure and initial access requires 
   ).rows[0];
   assert.equal(account.terms_version, "admin-created");
   assert.equal(account.email_verified, false);
+});
+
+test("Drive import validates the entire batch, stores separate PDFs and CSV, and updates R without duplicating orders", async (t) => {
+  const { PDFDocument } = require("pdf-lib");
+  const { DRIVE_SCOPE } = require("../server/drive-label-import.cjs");
+  const folderId = "folder-id-test";
+  const sheetId = "sheet-id-1234567890123456";
+  const first = "abcdef0123456789abcdef01";
+  const second = "abcdef0123456789abcdef02";
+  const trackingA = "9400000000000000000001";
+  const trackingB = "9400000000000000000002";
+  const orders = [{ orderId: first, tracking: trackingA }, { orderId: second, tracking: trackingB }];
+  const writes = [];
+  const saved = new Map();
+  let nextFile = 1;
+  let issue = false;
+  const idsInSheet = [["ID Order"], [first], [first]];
+  const drive = { files: {
+    get: async ({ fileId }, options) => {
+      assert.equal(fileId, folderId);
+      assert.equal(options.headers["X-Goog-Drive-Resource-Keys"], folderId + "/resource-key");
+      return { data: {
+        mimeType: "application/vnd.google-apps.folder", capabilities: { canAddChildren: true },
+      } };
+    },
+    list: async () => ({ data: { files: [...saved.values()] } }),
+    generateIds: async ({ count }) => ({ data: { ids: Array.from({ length: count }, () => "new-file-" + nextFile++) } }),
+    create: async ({ requestBody, media }) => {
+      assert.deepEqual(requestBody.parents, [folderId]);
+      const chunks = [];
+      for await (const chunk of media.body) chunks.push(chunk);
+      const file = {
+        ...requestBody,
+        webViewLink: "https://drive.google.com/file/d/" + requestBody.id + "/view",
+        bytes: Buffer.concat(chunks),
+      };
+      saved.set(requestBody.id, file);
+      writes.push("drive:" + requestBody.mimeType);
+      return { data: file };
+    },
+  } };
+  const sheetWrites = [];
+  const sheets = { spreadsheets: { values: {
+    get: async (args) => {
+      assert.equal(args.range, "'My ''Orders'''!H:H");
+      return { data: { values: idsInSheet } };
+    },
+    batchUpdate: async ({ spreadsheetId, resource }) => {
+      assert.equal(spreadsheetId, sheetId);
+      writes.push("sheet");
+      sheetWrites.push(resource.data);
+      for (const { range, values } of resource.data) {
+        const row = range.match(/!H(\d+)$/)?.[1];
+        if (row) idsInSheet[Number(row) - 1] = values[0];
+      }
+    },
+  } } };
+  const { browser, login, store } = await fixture(t, async (auth, account, sheet, options) => {
+    assert.equal(options.prepareDrive, true);
+    assert.equal(sheet, "My 'Orders'");
+    return {
+      plannedOrders: [
+        { orderId: first, rows: [{ H: first, R: first }] },
+        { orderId: second, rows: [{ H: second, R: second }] },
+      ],
+      labelBatches: [{
+        messageId: "email-1", orders, issues: issue ? ["Tem chưa rõ"] : [], files: [],
+      }],
+    };
+  }, {
+    driveServices: {
+      driveFactory: () => drive,
+      driveSheetsFactory: () => sheets,
+      driveRequest: operation => operation({}),
+      labelsGmailFactory: () => ({ users: { messages: { batchModify: async ({ resource }) => {
+        assert.deepEqual(resource, { ids: ["email-1"], removeLabelIds: ["UNREAD"] });
+        writes.push("gmail");
+      } } } }),
+    },
+  });
+  const client = browser();
+  const other = browser();
+  await login(client, "Owner");
+  await login(other, "Other");
+  for (const userId of ["Owner", "Other"]) {
+    const user = await store.get(userId);
+    const tokens = store.decrypt(user.tokens, userId);
+    await store.connect(userId, user.email, { ...tokens, scope: tokens.scope + " " + DRIVE_SCOPE });
+    await store.setSheet(userId, sheetId);
+  }
+  const body = { accountName: "Store", sheetName: "My 'Orders'", sheetId,
+    driveFolderUrl: "https://drive.google.com/drive/u/0/folders/" + folderId + "?resourcekey=resource-key" };
+  const prepare = (input = body) => client("/api/get-label/prepare-drive", { method: "POST", body: input });
+  const finish = (token, files, actor = client) =>
+    actor("/api/get-label/finish-drive", { method: "POST", body: { token, files } });
+  assert.equal((await prepare({ ...body, sheetId: "unsaved-sheet-id" })).status, 409);
+  issue = true;
+  const flagged = await (await prepare()).json();
+  assert.equal(flagged.token, null);
+  assert.deepEqual(writes, []);
+  issue = false;
+  const prepared = await (await prepare()).json();
+  assert.ok(prepared.token);
+  assert.deepEqual(writes, []);
+
+  const pdf = await PDFDocument.create();
+  pdf.addPage([288, 432]);
+  const data = Buffer.from(await pdf.save()).toString("base64");
+  const files = orders.map((order, index) => ({ ...order, data, source: "bundle.pdf", pageNo: 2 - index }));
+  assert.equal((await finish(prepared.token, files, other)).status, 409);
+  assert.equal((await finish(prepared.token, [{ ...files[0], tracking: trackingB }, files[1]])).status, 400);
+  assert.deepEqual(writes, []);
+
+  const result = await finish(prepared.token, files);
+  assert.equal(result.status, 200);
+  const payload = await result.json();
+  assert.equal(payload.writtenOrderCount, 1);
+  assert.equal(payload.linkedCount, 2);
+  assert.deepEqual(writes, ["drive:application/pdf", "drive:application/pdf", "drive:text/csv", "sheet", "gmail"]);
+  assert.deepEqual([...saved.values()].map(f => f.mimeType), ["application/pdf", "application/pdf", "text/csv"]);
+  assert.equal(saved.get("new-file-1").name, first + ".pdf");
+  const csv = saved.get("new-file-3");
+  assert.match(csv.bytes.toString("utf8"), /"bundle.pdf","2","abcdef0123456789abcdef01"/);
+  assert.ok(csv.bytes.toString("utf8").includes("https://drive.google.com/file/d/new-file-2/view"));
+  assert.equal(payload.csvUrl, csv.webViewLink);
+  assert.deepEqual(sheetWrites[0].filter(row => /!R\d+$/.test(row.range)).map(row => [row.range, row.values[0][0]]), [
+    ["'My ''Orders'''!R2", saved.get("new-file-1").webViewLink],
+    ["'My ''Orders'''!R3", saved.get("new-file-1").webViewLink],
+    ["'My ''Orders'''!R4", saved.get("new-file-2").webViewLink],
+  ]);
+
+  const retry = await finish(prepared.token, files);
+  assert.equal(retry.status, 200);
+  assert.equal((await retry.json()).writtenOrderCount, 0);
+  assert.equal(saved.size, 3);
 });

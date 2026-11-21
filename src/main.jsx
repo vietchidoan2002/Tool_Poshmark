@@ -49,9 +49,9 @@ function sheetNameStorageKey(userId) {
   return `pm_default_sheet_name:${userId}`;
 }
 
-function savedSheetName(userId) {
+function savedGetValue(key) {
   try {
-    return localStorage.getItem(sheetNameStorageKey(userId)) ?? "";
+    return localStorage.getItem(key) ?? "";
   } catch {
     return "";
   }
@@ -268,6 +268,7 @@ function App() {
   const sheetDraft = useRef(null);
   const [accountName, setAccountName] = useState("");
   const [sheetName, setSheetName] = useState("");
+  const [driveFolderUrl, setDriveFolderUrl] = useState("");
   const [tokenFile, setTokenFile] = useState("");
   const [gmail, setGmail] = useState({
     accounts: [],
@@ -277,12 +278,7 @@ function App() {
   const [getOutput, setGetOutput] = useState("");
   const [gmailLabels, setGmailLabels] = useState(null);
   const [labelProgress, setLabelProgress] = useState("");
-  const [labelConfirmation, setLabelConfirmation] = useState("");
-  const [confirmingLabels, setConfirmingLabels] = useState(false);
-  const gmailLabelUrl = gmailLabels?.url;
-  useEffect(() => () => {
-    if (gmailLabelUrl) URL.revokeObjectURL(gmailLabelUrl);
-  }, [gmailLabelUrl]);
+  const [pendingDrive, setPendingDrive] = useState(null);
   const [configMsg, setConfigMsg] = useState("");
   const [jobs, setJobs] = useState([]);
   const [cutBusy, setCutBusy] = useState(false);
@@ -327,11 +323,13 @@ function App() {
         authUser.current = session.userId || null;
         sheetDraft.current = null;
         setSheetId("");
-        setSheetName(authUser.current ? savedSheetName(authUser.current) : "");
+        const id = authUser.current;
+        setSheetName(id ? savedGetValue(sheetNameStorageKey(id)) : "");
+        setDriveFolderUrl(id ? savedGetValue(`pm_drive_folder:${id}`) : "");
         setAccountName("");
         setGetOutput("");
         setGmailLabels(null);
-        setLabelConfirmation("");
+        setPendingDrive(null);
         setPhoneReady(false);
       }
       if (!session.authenticated) {
@@ -396,12 +394,10 @@ function App() {
     }
   }
 
-  function changeSheetName(value) {
-    setSheetName(value);
-    const userId = authUser.current;
-    if (!userId) return;
+  function saveGetValue(key, value) {
+    if (!authUser.current) return;
     try {
-      localStorage.setItem(sheetNameStorageKey(userId), value);
+      localStorage.setItem(key, value);
     } catch {
       // Editing still works when browser storage is unavailable.
     }
@@ -442,10 +438,10 @@ function App() {
       )
     )
       return;
-    window.location.assign("/api/auth/start");
+    window.location.assign(authenticated ? "/api/auth/start?drive=1" : "/api/auth/start");
   }
   async function logout() {
-    if (cutBusy || getBusy || confirmingLabels) return;
+    if (cutBusy || getBusy) return;
     if (
       jobs.length &&
       !window.confirm(
@@ -477,7 +473,7 @@ function App() {
     }
   }
   function reloadVersion() {
-    if (cutBusy || getBusy || confirmingLabels) return;
+    if (cutBusy || getBusy) return;
     if (
       jobs.length &&
       !window.confirm(
@@ -503,101 +499,94 @@ function App() {
       setConfigMsg(e.message);
     }
   }
-  async function runGet() {
-    if (!accountName.trim()) {
-      setGetOutput("Hãy nhập tên account Poshmark.");
-      return;
+  async function saveLabelsToDrive(job) {
+    const userId = authUser.current;
+    setLabelProgress(`Đang lưu ${job.files.length} tem vào Drive và ghi link vào cột R…`);
+    const response = await fetch(API + "/api/get-label/finish-drive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(job),
+    });
+    const result = await response.json();
+    if (authUser.current !== userId) return;
+    if (!response.ok) {
+      if (response.status >= 400 && response.status < 500 && response.status !== 409)
+        setPendingDrive(null);
+      throw Error(result.error || "Chưa lưu được tem vào Drive.");
     }
-    if (!sheetName.trim()) {
-      setGetOutput("Hãy nhập tên tab Google Sheets.");
-      return;
-    }
-    if (!tokenFile) {
-      setGetOutput("Hãy chọn tài khoản Gmail.");
-      return;
-    }
+    setPendingDrive(null);
+    setGmailLabels(current => ({ ...current, result }));
+    setGetOutput(current => [current,
+      `Đã lưu ${result.linkedCount} tem và cập nhật cột R. Ghi mới ${result.writtenOrderCount} đơn.`,
+      ...result.warnings,
+    ].filter(Boolean).join("\n"));
+  }
 
-    if (getBusy || cutBusy || confirmingLabels) return;
-    if (gmailLabels?.url && gmailLabels.confirmations.length &&
-        !window.confirm("Bạn có muốn thay kết quả tem hiện tại bằng lượt mới?"))
+  async function runGet() {
+    if (getBusy || cutBusy) return;
+    if (!accountName.trim() || !sheetName.trim() || !driveFolderUrl.trim() || !tokenFile) {
+      setGetOutput("Hãy nhập tên account, tên tab, link thư mục Drive và chọn Gmail.");
       return;
+    }
+    if (pendingDrive && !window.confirm("Bắt đầu lượt mới và thay lượt lưu Drive đang chờ?")) return;
     const userId = authUser.current;
     setGetBusy(true);
+    setPendingDrive(null);
     setGmailLabels(null);
-    setLabelConfirmation("");
-    setGetOutput("Đang chạy Get Label…");
+    setGetOutput("Đang kiểm tra link Drive và đọc email…");
     try {
-      const r = await fetch(API + "/api/get-label/run", {
+      const response = await fetch(API + "/api/get-label/prepare-drive", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          accountName: accountName.trim(),
-          sheetName: sheetName.trim(),
-          tokenFile,
-          includeLabels: true,
+          accountName: accountName.trim(), sheetName: sheetName.trim(),
+          sheetId: sheetId.trim(), driveFolderUrl: driveFolderUrl.trim(),
         }),
       });
-      const d = await r.json();
+      const data = await response.json();
       if (authUser.current !== userId) return;
-      setGetOutput(d.output || d.error || "Không có log.");
-      if (!r.ok)
-        setGetOutput(
-          (d.error || "Get Label thất bại.") + "\n" + (d.output || ""),
-        );
-      const batches = d.labelBatches ?? d.partialStats?.labelBatches;
-      if (batches?.length) {
-        try {
-          setLabelProgress("Đang chuẩn bị PDF từ Gmail…");
-          const { prepareGmailLabels } = await import("./gmail-labels.js");
-          const { zip, ...labels } = await prepareGmailLabels(batches, {
-            openPdf: (data) => pdfjsLib.getDocument({ data, worker: getPdfWorker(), isEvalSupported: false }),
-            renderPage,
-            exportCanvas: exportLabelCanvas,
-            setStatus: setLabelProgress,
-          });
-          if (authUser.current === userId)
-            setGmailLabels({ ...labels, url: zip ? URL.createObjectURL(zip) : null });
-        } catch {
-          if (authUser.current === userId)
-            setGmailLabels({
-              issues: ["Không chuẩn bị được ZIP tem. Các email có PDF vẫn có thể xử lý lại."],
-              confirmations: [], reviewFiles: [], count: 0, url: null,
-            });
-        }
-      }
-      await refresh();
-    } catch (e) {
-      if (authUser.current === userId) setGetOutput("Lỗi kết nối: " + e.message);
+      if (!response.ok) throw Error(data.error || "Chưa đọc được email.");
+      setGetOutput(data.output || "Không có email tem mới.");
+      if (!data.labelBatches.length) return;
+
+      const { prepareGmailLabels, encodeLabelFiles } = await import("./gmail-labels.js");
+      const { files, ...labels } = await prepareGmailLabels(data.labelBatches, {
+        openPdf: (pdf) => pdfjsLib.getDocument({ data: pdf, worker: getPdfWorker(), isEvalSupported: false }),
+        renderPage,
+        exportCanvas: exportLabelCanvas,
+        setStatus: setLabelProgress,
+      });
+      if (authUser.current !== userId) return;
+      setGmailLabels(labels);
+      if (labels.issues.length) return;
+      if (!data.token || !files.length)
+        throw Error("Chưa xác minh đủ tem cho tất cả đơn. Get Label đã dừng.");
+      const job = { token: data.token, files: encodeLabelFiles(files) };
+      const size = job.files.reduce((total, file) => total + file.data.length, 0);
+      if (size > Math.ceil(16 * 1024 * 1024 / 3) * 4 + 320)
+        throw Error("Tổng PDF tem vượt 16 MB. Hãy chia nhỏ lượt chạy.");
+      setPendingDrive(job);
+      await saveLabelsToDrive(job);
+    } catch (error) {
+      if (authUser.current === userId)
+        setGetOutput(current => [current, error.message].filter(Boolean).join("\n"));
     } finally {
       setLabelProgress("");
       setGetBusy(false);
     }
   }
-  async function downloadGmailLabels() {
-    if (!gmailLabels?.url || confirmingLabels) return;
+
+  async function retryDrive() {
+    if (!pendingDrive || getBusy) return;
     const userId = authUser.current;
-    triggerDownload({ url: gmailLabels.url, name: "poshmark-labels-4x6.zip" });
-    if (!gmailLabels.confirmations.length) return;
-    setConfirmingLabels(true);
+    setGetBusy(true);
     try {
-      const response = await fetch(API + "/api/get-label/confirm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirmations: gmailLabels.confirmations }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw Error(data.error || "Chưa xác nhận được email.");
-      if (authUser.current === userId) {
-        setLabelConfirmation("Đã xác nhận các email đã ghép đủ tem.");
-        setGmailLabels(current => current?.url === gmailLabels.url
-          ? { ...current, confirmations: [] }
-          : current);
-      }
+      await saveLabelsToDrive(pendingDrive);
     } catch (error) {
-      if (authUser.current === userId)
-        setLabelConfirmation(error.message);
+      if (authUser.current === userId) setGetOutput(error.message);
     } finally {
-      setConfirmingLabels(false);
+      setLabelProgress("");
+      setGetBusy(false);
     }
   }
   async function addFiles(fileList) {
@@ -1068,7 +1057,7 @@ function App() {
             )}
             <div className="inlineActions">
               <button onClick={connectGoogle}>
-                Kết nối / làm mới Gmail
+                Kết nối / làm mới Gmail &amp; Drive
               </button>
               <button
                 className="secondary"
@@ -1094,9 +1083,28 @@ function App() {
               Tên tab Google Sheets
               <input
                 value={sheetName}
-                onChange={(e) => changeSheetName(e.target.value)}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setSheetName(value);
+                  saveGetValue(sheetNameStorageKey(authUser.current), value);
+                }}
                 placeholder="Ví dụ: Đơn Poshmark"
                 autoComplete="off"
+              />
+            </label>
+            <label className="field">
+              Link thư mục Google Drive lưu tem
+              <input
+                type="url"
+                value={driveFolderUrl}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setDriveFolderUrl(value);
+                  saveGetValue(`pm_drive_folder:${authUser.current}`, value);
+                }}
+                placeholder="https://drive.google.com/drive/folders/..."
+                autoComplete="off"
+                maxLength={1000}
               />
             </label>
             <label className="field">
@@ -1117,28 +1125,28 @@ function App() {
           <aside className="notice" role="note">
             <strong>Lưu ý</strong>
             <p>
-              Get Label ghi vào Google Sheets và lấy tem từ PDF đính kèm.
-              Email đã ghép đủ tem được đánh dấu đã đọc khi bạn tải ZIP.
+              Khi tất cả tem khớp tracking, Get Label lưu PDF và CSV vào Drive,
+              ghi link tem vào cột R rồi đánh dấu email đã đọc.
             </p>
           </aside>
           <section className="runbox">
             <div>
               <h3>Chạy lấy đơn</h3>
               <p>
-                Quét email chưa đọc, bỏ qua Order ID đã có trong Sheet, ghi
-                dữ liệu vào tab “{sheetName || "đã chọn"}”.
+                Kiểm tra tem trong email chưa đọc và ghi link tem vào tab
+                “{sheetName || "đã chọn"}”.
               </p>
             </div>
             <button
               disabled={
                 getBusy ||
                 cutBusy ||
-                confirmingLabels ||
                 !phoneReady ||
                 !sheetId ||
                 !gmail.accounts?.length ||
                 !accountName.trim() ||
                 !sheetName.trim() ||
+                !driveFolderUrl.trim() ||
                 !tokenFile
               }
               onClick={runGet}
@@ -1151,31 +1159,35 @@ function App() {
             <section className="configbox">
               <h3>Tem từ Gmail</h3>
               <p>{gmailLabels.count} tem đã khớp tracking</p>
-              <div className="inlineActions">
-                {gmailLabels.url && (
-                  <button onClick={downloadGmailLabels} disabled={getBusy || confirmingLabels}>
-                    Tải tem 4×6 (.zip)
-                  </button>
-                )}
-                {!!gmailLabels.reviewFiles.length && (
-                  <button
-                    className="secondary"
-                    disabled={cutBusy || getBusy || !!review}
-                    onClick={() => {
-                      navigatePage("cut");
-                      void addFiles(gmailLabels.reviewFiles);
-                    }}
-                  >
-                    Kiểm tra PDF trong Cut Label
-                  </button>
-                )}
-              </div>
-              {labelConfirmation && <p role="status">{labelConfirmation}</p>}
+              {gmailLabels.result && (
+                <div className="inlineActions">
+                  <a href={gmailLabels.result.folderUrl} target="_blank" rel="noreferrer">Mở thư mục Drive</a>
+                  <a href={gmailLabels.result.csvUrl} target="_blank" rel="noreferrer">Mở file CSV</a>
+                </div>
+              )}
+              {pendingDrive && !getBusy && (
+                <button className="secondary" onClick={retryDrive}>Thử lưu Drive lại</button>
+              )}
               {!!gmailLabels.issues.length && (
-                <details open>
-                  <summary>Cần kiểm tra ({gmailLabels.issues.length})</summary>
-                  <ul>{gmailLabels.issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul>
-                </details>
+                <>
+                  <p className="warning" role="alert">Đã dừng lượt chạy trước khi lưu Drive và ghi Sheets.</p>
+                  <details open>
+                    <summary>Cần kiểm tra ({gmailLabels.issues.length})</summary>
+                    <ul>{gmailLabels.issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul>
+                  </details>
+                  {!!gmailLabels.reviewFiles.length && (
+                    <button
+                      className="secondary"
+                      disabled={cutBusy || getBusy || !!review}
+                      onClick={() => {
+                        navigatePage("cut");
+                        void addFiles(gmailLabels.reviewFiles);
+                      }}
+                    >
+                      Kiểm tra PDF trong Cut Label
+                    </button>
+                  )}
+                </>
               )}
             </section>
           )}

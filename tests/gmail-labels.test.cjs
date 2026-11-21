@@ -62,3 +62,30 @@ test("Gmail confirmation is bound to the account, Gmail connection and expiratio
   assert.equal(confirmedMessageId(secret, user, token.replace("message-1", "message-2"), 2000), null);
   assert.equal(confirmedMessageId(secret, user, token, 3601000), null);
 });
+
+test("preparing a Drive batch reads emails and attachments without marking read or touching Sheets", async () => {
+  const pdf = Buffer.from("%PDF-1.4\nfixture");
+  const gmail = { users: { messages: {
+    list: async () => ({ data: { messages: [{ id: "mail-ready" }, { id: "mail-needs-review" }] } }),
+    get: async ({ id }) => ({ data: { payload: { mimeType: "multipart/mixed", parts: [
+      { mimeType: "text/plain", body: { data: Buffer.from(
+        `Order Number ${id === "mail-ready" ? first : second}\nTracking Number: ${id === "mail-ready" ? trackingA : trackingB}`,
+      ).toString("base64url") } },
+      ...(id === "mail-ready"
+        ? [{ mimeType: "application/pdf", filename: "label.pdf", body: { data: pdf.toString("base64url") } }]
+        : []),
+    ] } } }),
+    modify: async () => assert.fail("A preflight must not change Gmail"),
+  } } };
+  const sheets = { spreadsheets: { values: {
+    get: async () => assert.fail("A preflight must not need Sheets"),
+    batchUpdate: async () => assert.fail("A preflight must not write Sheets"),
+  } } };
+  const report = await processOrders(null, "Shop", "Orders", {
+    gmail, sheets, prepareDrive: true, request: fn => fn({}), log: () => {},
+  });
+  assert.equal(report.writtenCount, 0);
+  assert.deepEqual(report.plannedOrders.map(order => order.orderId), [first, second]);
+  assert.equal(report.labelBatches[0].files.length, 1);
+  assert.match(report.labelBatches[1].issues[0], /thiếu PDF/);
+});

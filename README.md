@@ -27,9 +27,11 @@ The automated regression tests mock Google APIs and do not read or change your i
 
 ## Get Label: shipping PDFs from Gmail
 
-**Chạy Get Label** imports orders into Sheets and collects the shipping PDFs attached to the same emails. The browser reads USPS Code 128 barcodes and matches each page against the tracking numbers listed alongside Order IDs in its own email. A PDF can contain multiple pages in any order. There is no OCR step in this automatic flow.
+In **Thông tin chạy Get Label**, paste an editable Google Drive folder link. **Chạy Get Label** collects the shipping PDFs attached to unread order emails. The browser reads USPS Code 128 barcodes and matches each page against the tracking numbers listed alongside Order IDs in its own email. A PDF can contain multiple pages in any order. There is no OCR step in this automatic flow.
 
-Download matched 4×6 labels in a ZIP with a CSV manifest. Orders already in Sheets can still supply labels. Unread emails with attached PDFs are marked read when the ZIP download is requested, for emails whose pages and orders all matched. Mismatches, unreadable codes, and pages with multiple USPS barcodes are listed under **Cần kiểm tra** and can be opened in Cut Label. Each run can collect up to 50 PDFs (8 MiB total) and scan up to 80 pages.
+When every label matches, Get Label saves the separate 4×6 PDFs and a CSV manifest in the chosen Drive folder, writes each PDF link to column R, and marks its email as read. Orders already in Sheets get an updated link without adding duplicate rows. Mismatches, unreadable codes, and pages with multiple USPS barcodes stop the imports before Drive or Sheets writes. **Cần kiểm tra** shows the barcode tracking and the relevant Order IDs with their email tracking. Open the PDFs in Cut Label for manual review. Each run can collect up to 50 PDFs (8 MiB total), scan up to 80 pages, and upload up to 16 MiB of converted PDFs.
+
+Enable the Google Drive API for the OAuth project, then select **Kết nối / làm mới Gmail & Drive** and grant the Drive permission. The linked Google account must be allowed to add files to the chosen folder. Existing Drive files are reused when retrying after a partial failure.
 
 ## Cut Label: filenames, tracking, and exports
 

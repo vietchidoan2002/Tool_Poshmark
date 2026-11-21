@@ -1052,3 +1052,77 @@ test("a Google-claimed account can set a fresh password from its profile", async
     true,
   );
 });
+
+test("Get Label pauses on a mismatched barcode and sends only a complete Drive batch", async (t) => {
+  const { prepareZXingModule, writeBarcode } = await import("zxing-wasm/writer");
+  prepareZXingModule({ overrides: {
+    wasmBinary: await fs.readFile(require.resolve("zxing-wasm/writer/zxing_writer.wasm")),
+  } });
+  const second = "abcdef0123456789abcdef02";
+  const expected = "9400000000000000000002";
+  const mismatch = "9400000000000000000099";
+  async function bundle(firstTracking) {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    for (const tracking of [firstTracking, TRACKING]) {
+      const barcode = await writeBarcode("420123456789\x1d" + tracking, { format: "Code128", scale: 3 });
+      assert.equal(barcode.error, "");
+      const image = await doc.embedPng(new Uint8Array(await barcode.image.arrayBuffer()));
+      const page = doc.addPage([612, 792]);
+      page.drawText("SAMPLE SHIPPING LABEL", { x: 164, y: 722, size: 20, font });
+      page.drawImage(image, { x: 164, y: 335, width: 250, height: 65 });
+    }
+    return Buffer.from(await doc.save()).toString("base64");
+  }
+  const sheetId = "test-spreadsheet-id-123456789";
+  const folder = "https://drive.google.com/drive/folders/test-folder";
+  const page = await open(t, { sheetId });
+  const finished = [];
+  let data = await bundle(mismatch);
+  await page.route("**/api/gmail/status", (route) => route.fulfill({ json: {
+    accounts: [{ file: "personal", email: "demo@example.test" }],
+  } }));
+  await page.route("**/api/get-label/prepare-drive", (route) => {
+    assert.equal(route.request().postDataJSON().driveFolderUrl, folder);
+    return route.fulfill({ json: {
+      token: "sealed-plan", output: "Prepared",
+      labelBatches: [{
+        orders: [{ orderId: ID, tracking: TRACKING }, { orderId: second, tracking: expected }],
+        files: [{ filename: "bundle.pdf", data }], issues: [],
+      }],
+    } });
+  });
+  await page.route("**/api/get-label/finish-drive", (route) => {
+    finished.push(route.request().postDataJSON());
+    return route.fulfill({ json: {
+      linkedCount: 2, writtenOrderCount: 1, warnings: [],
+      folderUrl: folder, csvUrl: "https://drive.google.com/file/d/test-csv-file/view",
+    } });
+  });
+  await page.getByRole("button", { name: "Get Label", exact: true }).click();
+  await page.getByRole("button", { name: "Cập nhật tài khoản Gmail" }).click();
+  await page.getByLabel("Tên account Poshmark").fill("Store");
+  await page.getByLabel("Tên tab Google Sheets").fill("Orders");
+  await page.getByLabel("Link thư mục Google Drive lưu tem").fill(folder);
+
+  const run = page.getByRole("button", { name: "Chạy Get Label", exact: true });
+  await run.click();
+  await page.getByText("Cần kiểm tra (1)").waitFor();
+  const issue = await page.locator(".configbox li").innerText();
+  assert.match(issue, /bundle\.pdf · trang 1/);
+  assert.ok(issue.includes("Tracking trên tem: " + mismatch));
+  assert.ok(issue.includes("Order ID " + second + " (tracking trong email: " + expected + ")"));
+  assert.equal(finished.length, 0);
+
+  data = await bundle(expected);
+  await run.click();
+  await page.getByRole("link", { name: "Mở file CSV" }).waitFor();
+  assert.equal(finished.length, 1);
+  assert.equal(finished[0].token, "sealed-plan");
+  assert.deepEqual(finished[0].files.map(({ orderId, tracking, pageNo }) => [orderId, tracking, pageNo]).sort(), [
+    [ID, TRACKING, 2], [second, expected, 1],
+  ]);
+  for (const file of finished[0].files)
+    await checkPdf(Buffer.from(file.data, "base64"));
+  assert.equal(page.ocrCount, 0);
+});

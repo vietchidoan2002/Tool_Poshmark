@@ -11,6 +11,10 @@ const { createWebStore } = require("./web-store.cjs");
 const { createGoogleRequest } = require("./google-request.cjs");
 const { issueConfirmation, confirmedMessageId } = require("./gmail-labels.cjs");
 const {
+  DRIVE_SCOPE, parseDriveFolder, checkDriveFolder, planOrders, readVerifiedFiles,
+  saveDriveFiles, sheetRows, writeDriveLinks,
+} = require("./drive-label-import.cjs");
+const {
   oauthDiagnostic,
   oauthFailurePage,
 } = require("./oauth-diagnostics.cjs");
@@ -92,7 +96,11 @@ async function createWebApp(config, deps = {}) {
     res.set("Cache-Control", "no-store");
     next();
   });
-  app.use(express.json({ limit: "32kb" }));
+  const driveFinishPath = "/api/get-label/finish-drive";
+  const parseJson = express.json({ limit: "32kb" });
+  app.use((req, res, next) =>
+    req.path === driveFinishPath ? next() : parseJson(req, res, next),
+  );
   app.use(["/api/auth/start", "/oauth2callback"], (req, res, next) => {
     req.oauthStage = "SESSION_SAVE";
     next();
@@ -181,6 +189,7 @@ async function createWebApp(config, deps = {}) {
         state,
         codeVerifier,
         expires: Date.now() + 10 * 60000,
+        drive: !!req.session.userId && req.query.drive === "1",
       };
       await saveSession(req);
       res.redirect(
@@ -189,12 +198,14 @@ async function createWebApp(config, deps = {}) {
           code_challenge: codeChallenge,
           code_challenge_method: "S256",
           access_type: "offline",
+          include_granted_scopes: true,
           prompt: "consent",
           scope: [
             "openid",
             "email",
             "https://www.googleapis.com/auth/gmail.modify",
             "https://www.googleapis.com/auth/spreadsheets",
+            ...(req.session.oauth.drive ? [DRIVE_SCOPE] : []),
           ],
         }),
       );
@@ -242,6 +253,8 @@ async function createWebApp(config, deps = {}) {
         return res
           .status(400)
           .send("Hãy cấp đủ quyền Gmail và Google Sheets rồi kết nối lại.");
+      if (pending.drive && !scopes.includes(DRIVE_SCOPE))
+        return res.status(400).send("Hãy cấp thêm quyền Google Drive để lưu tem, rồi kết nối lại.");
       const ticket = await auth.verifyIdToken({
         idToken: tokens.id_token,
         audience: config.clientId,
@@ -454,6 +467,145 @@ async function createWebApp(config, deps = {}) {
       }
     }),
   );
+  async function driveImportUser(req) {
+    if (config.requirePhoneReview) {
+      const profile = await phones.get(req.session.userId);
+      if (!profile?.phone || !profile.reviewed)
+        throw Object.assign(Error(), {
+          status: 403, publicMessage: "Hãy chờ quản trị viên kiểm tra số điện thoại trước khi chạy Get Label.",
+        });
+    }
+    const user = await store.get(req.session.userId);
+    if (!user?.sheet_id || !user.tokens)
+      throw Object.assign(Error(), {
+        status: 400, publicMessage: "Hãy kết nối Gmail, Drive và lưu Sheet ID trước.",
+      });
+    return user;
+  }
+  function driveClient(auth) {
+    return deps.driveFactory?.(auth) || google.drive({ version: "v3", auth });
+  }
+  function requireDriveScope(auth) {
+    if (!String(auth.credentials?.scope || "").split(/\s+/).includes(DRIVE_SCOPE))
+      throw Object.assign(Error(), {
+        status: 403, publicMessage: "Hãy bấm Kết nối / làm mới Gmail & Drive và cấp quyền Google Drive.",
+      });
+  }
+  function driveError(res, error, fallback) {
+    return res.status(error.publicMessage ? error.status : 502)
+      .json({ error: error.publicMessage || fallback });
+  }
+  app.post(
+    "/api/get-label/prepare-drive",
+    asyncRoute(async (req, res) => {
+      const folder = parseDriveFolder(req.body?.driveFolderUrl);
+      const accountName = String(req.body?.accountName || "").trim();
+      const sheetName = String(req.body?.sheetName || "").trim();
+      if (!folder)
+        return res.status(400).json({ error: "Hãy nhập link thư mục Google Drive hợp lệ." });
+      if (!accountName || accountName.length > 200 || !sheetName || sheetName.length > 100)
+        return res.status(400).json({ error: "Hãy nhập tên account Poshmark và tên tab Sheets hợp lệ." });
+      const refreshWrites = [];
+      let unlock;
+      try {
+        const user = await driveImportUser(req);
+        if (typeof req.body?.sheetId !== "string" || req.body.sheetId.trim() !== user.sheet_id)
+          return res.status(409).json({ error: "Hãy lưu Sheet ID đang hiển thị trước khi chạy Get Label." });
+        unlock = await store.lock(user.id, user.sheet_id);
+        if (!unlock)
+          return res.status(409).json({ error: "Tài khoản hoặc bảng tính đang xử lý đơn. Vui lòng chờ." });
+        const auth = authorizeGmail(user, refreshWrites);
+        requireDriveScope(auth);
+        const request = deps.driveRequest || createGoogleRequest();
+        const target = await checkDriveFolder(driveClient(auth), folder, request);
+        const run = deps.runOrders || require("./bot.cjs").processOrders;
+        const logs = [];
+        const stats = await run(auth, accountName, sheetName, {
+          spreadsheetId: user.sheet_id, prepareDrive: true, request,
+          log: (level, message) => logs.push(`[${level}] ${message}`),
+        });
+        if ((await Promise.all(refreshWrites)).includes(false))
+          return res.status(502).json({ error: "Chưa lưu được token Google. Hãy thử lại." });
+        const orders = planOrders(stats);
+        let token = null;
+        if (orders) {
+          const plan = {
+            kind: "drive-label-import", expires: Date.now() + 60 * 60 * 1000,
+            tokenVersion: user.token_version, sheetId: user.sheet_id, accountName, sheetName,
+            folder, orders, messageIds: stats.labelBatches.map(batch => batch.messageId),
+          };
+          if (Buffer.byteLength(JSON.stringify(plan)) > 600 * 1024)
+            return res.status(413).json({ error: "Thông tin đơn trong lượt chạy quá lớn. Hãy chia nhỏ số email chưa đọc." });
+          token = store.encrypt(plan, user.id);
+        }
+        return res.json({
+          token, folderUrl: target.webViewLink, output: logs.join("\n"),
+          labelBatches: stats.labelBatches.map(({ orders, files, issues }) => ({ orders, files, issues })),
+        });
+      } catch (error) {
+        await Promise.allSettled(refreshWrites);
+        return driveError(res, error, "Chưa chuẩn bị được tem. Hãy kiểm tra quyền Google và thử lại.");
+      } finally {
+        if (unlock) await unlock();
+      }
+    }),
+  );
+  app.post(
+    driveFinishPath,
+    express.json({ limit: "24mb" }),
+    asyncRoute(async (req, res) => {
+      const token = req.body?.token;
+      if (typeof token !== "string" || token.length > 900 * 1024)
+        return res.status(400).json({ error: "Lượt xử lý tem không hợp lệ." });
+      const refreshWrites = [];
+      let unlock, runId, stats;
+      try {
+        const user = await driveImportUser(req);
+        let plan;
+        try { plan = store.decrypt(token, user.id); } catch { /* Rejected below. */ }
+        if (plan?.kind !== "drive-label-import" || plan.expires <= Date.now() ||
+            plan.tokenVersion !== user.token_version || plan.sheetId !== user.sheet_id)
+          return res.status(409).json({ error: "Lượt chạy đã hết hạn hoặc cấu hình Google đã thay đổi. Hãy chạy lại Get Label." });
+        unlock = await store.lock(user.id, user.sheet_id);
+        if (!unlock)
+          return res.status(409).json({ error: "Tài khoản hoặc bảng tính đang xử lý đơn. Vui lòng chờ." });
+
+        const files = await readVerifiedFiles(req.body.files, plan.orders);
+        const auth = authorizeGmail(user, refreshWrites);
+        requireDriveScope(auth);
+        const request = deps.driveRequest || createGoogleRequest();
+        const drive = driveClient(auth);
+        const sheets = deps.driveSheetsFactory?.(auth) || google.sheets({ version: "v4", auth });
+        const gmail = deps.labelsGmailFactory?.(auth) || google.gmail({ version: "v1", auth });
+        const folder = await checkDriveFolder(drive, plan.folder, request);
+        const rows = await sheetRows(sheets, plan, request);
+        runId = await admin.usage.start(user.id, plan.accountName);
+        const { links, csvUrl } = await saveDriveFiles({ drive, folder, files, userId: user.id, request });
+        stats = await writeDriveLinks(sheets, plan, rows, links, request);
+
+        const warnings = [];
+        try {
+          await request(options => gmail.users.messages.batchModify({
+            userId: "me",
+            resource: { ids: plan.messageIds, removeLabelIds: ["UNREAD"] },
+          }, options));
+        } catch {
+          warnings.push("Đã lưu Drive và cột R nhưng Gmail chưa đánh dấu được thư đã đọc. Chạy lại sẽ dùng lại tệp đã lưu.");
+        }
+        if ((await Promise.all(refreshWrites)).includes(false))
+          warnings.push("Chưa lưu được token Google mới. Có thể cần kết nối lại lần sau.");
+        await admin.usage.finish(runId, "success", stats);
+        return res.json({ ...stats, csvUrl, folderUrl: folder.webViewLink, warnings });
+      } catch (error) {
+        await Promise.allSettled(refreshWrites);
+        if (runId)
+          await admin.usage.finish(runId, stats ? "partial" : "failed", stats || {}).catch(() => {});
+        return driveError(res, error, "Chưa hoàn tất lưu Drive hoặc cập nhật cột R. Hãy thử lại để dùng lại các tệp đã lưu.");
+      } finally {
+        if (unlock) await unlock();
+      }
+    }),
+  );
   app.post(
     "/api/get-label/run",
     asyncRoute(async (req, res) => {
@@ -560,6 +712,10 @@ async function createWebApp(config, deps = {}) {
   app.use((error, req, res, next) => {
     if (config.testing && deps.onError) deps.onError(error);
     if (res.headersSent) return next(error);
+    if (req.path === driveFinishPath && (error.status === 413 || error.status === 400))
+      return res.status(error.status).json({
+        error: error.status === 413 ? "Lô tem quá lớn. Hãy chia nhỏ lượt chạy." : "Dữ liệu tem không hợp lệ.",
+      });
     if (req.path === "/oauth2callback" || req.path === "/api/auth/start") {
       const diagnostic = oauthDiagnostic(error, req.oauthStage);
       // A failed explicit session save must not be retried by res.end().

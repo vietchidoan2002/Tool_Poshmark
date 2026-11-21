@@ -1,8 +1,6 @@
 import { readBarcodes, prepareZXingModule } from "zxing-wasm/reader";
 import wasmUrl from "zxing-wasm/reader/zxing_reader.wasm?url";
-import { zipSync, strToU8 } from "fflate";
 import { barcodeTrackings } from "../shared/usps-tracking.mjs";
-import { exportManifest } from "./label-export.js";
 
 const MAX_PAGES = 80;
 
@@ -14,28 +12,35 @@ function asPdfFile({ filename, data }) {
   return new File([bytes], name, { type: "application/pdf" });
 }
 
+export function encodeLabelFiles(files) {
+  return files.map(({ bytes, ...file }) => {
+    const parts = [];
+    for (let i = 0; i < bytes.length; i += 16384)
+      parts.push(String.fromCharCode(...bytes.subarray(i, i + 16384)));
+    return { ...file, data: btoa(parts.join("")) };
+  });
+}
+
 export async function prepareGmailLabels(batches, { openPdf, renderPage, exportCanvas, setStatus }) {
   const issues = [];
-  const confirmations = [];
   const reviewFiles = [];
-  const entries = [];
-  const archive = Object.create(null);
-  const exported = new Set();
+  const files = new Map();
   let scanned = 0;
 
   for (const [index, batch] of batches.entries()) {
     const batchIssues = [...batch.issues];
+    const pageIssues = [];
     const batchFiles = [];
     const orders = new Map();
     const matches = new Map();
     for (const { orderId, tracking } of batch.orders) {
-      if (!tracking) {
-        batchIssues.push(`Đơn ${orderId} thiếu tracking rõ ràng trong email.`);
-        continue;
-      }
+      if (!tracking) continue;
       if (!orders.has(tracking)) orders.set(tracking, new Set());
       orders.get(tracking).add(orderId);
     }
+
+    const report = (location, reason, trackings = []) =>
+      pageIssues.push({ location, reason, trackings: [...trackings] });
 
     for (const attachment of batch.files) {
       let loading;
@@ -47,12 +52,13 @@ export async function prepareGmailLabels(batches, { openPdf, renderPage, exportC
         for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
           const location = `${file.name} · trang ${pageNo}`;
           if (scanned >= MAX_PAGES) {
-            batchIssues.push(`${location}: đã đạt giới hạn ${MAX_PAGES} trang trong lượt này.`);
+            report(location, `đã đạt giới hạn ${MAX_PAGES} trang trong lượt này`);
             break;
           }
           scanned++;
           setStatus(`Đang đọc barcode · ${location}`);
           let canvas;
+          let trackings;
           try {
             const page = await pdf.getPage(pageNo);
             canvas = await renderPage(page, 300 / 72);
@@ -60,7 +66,7 @@ export async function prepareGmailLabels(batches, { openPdf, renderPage, exportC
             const codes = await readBarcodes(pixels, {
               formats: ["Code128"], textMode: "Plain", tryHarder: true, maxNumberOfSymbols: 16,
             });
-            const trackings = new Set(
+            trackings = new Set(
               codes.filter(code => code.isValid).flatMap(code => {
                 const candidates = barcodeTrackings(code.text);
                 const expected = candidates.filter(tracking => orders.has(tracking));
@@ -68,68 +74,66 @@ export async function prepareGmailLabels(batches, { openPdf, renderPage, exportC
               }),
             );
             if (trackings.size !== 1) {
-              batchIssues.push(`${location}: ${trackings.size > 1 ? "có nhiều tracking trên một trang" : "không đọc được barcode USPS"}.`);
+              report(location, trackings.size > 1 ? "có nhiều tracking trên một trang" : "không đọc được barcode USPS", trackings);
               continue;
             }
             const [tracking] = trackings;
             const orderIds = orders.get(tracking);
             if (orderIds?.size !== 1) {
-              batchIssues.push(`${location}: tracking không khớp duy nhất với một đơn trong email.`);
+              report(location, "tracking không khớp duy nhất với một đơn trong email", trackings);
               continue;
             }
             const [orderId] = orderIds;
             if (matches.has(tracking)) {
               matches.set(tracking, null);
-              batchIssues.push(`${location}: tracking lặp trong cùng email.`);
+              report(location, "tracking lặp trong cùng email", trackings);
               continue;
             }
             const bytes = await exportCanvas(canvas, pixels);
-            matches.set(tracking, {
-              bytes, job: { fileName: file.name }, page: { pageNo, orderId, tracking },
-            });
+            matches.set(tracking, { bytes, orderId, tracking, source: file.name, pageNo });
           } catch {
-            batchIssues.push(`${location}: không xử lý được trang PDF.`);
+            report(location, "không xử lý được trang PDF", trackings);
           } finally {
             if (canvas) canvas.width = 0;
           }
         }
       } catch {
-        batchIssues.push(`${attachment.filename}: không mở được PDF.`);
+        report(attachment.filename, "không mở được PDF");
       } finally {
         await loading?.destroy().catch(() => {});
       }
     }
 
-    for (const tracking of orders.keys()) {
-      if (!matches.get(tracking)) {
-        batchIssues.push(`Chưa có tem khớp tracking ${tracking}.`);
-        continue;
-      }
-      const { bytes, ...entry } = matches.get(tracking);
-      const { orderId } = entry.page;
-      const pair = `${orderId}:${tracking}`;
-      if (exported.has(pair)) continue;
-      exported.add(pair);
-      const defaultName = `${orderId}.pdf`;
-      const name = archive[defaultName] ? `${orderId}-${tracking}.pdf` : defaultName;
-      archive[name] = bytes;
-      entries.push({ ...entry, name });
+    const unmatched = batch.orders.filter(order => !matches.get(order.tracking));
+    const reported = new Set();
+    const describe = ({ orderId, tracking }) =>
+      `Order ID ${orderId} (tracking trong email: ${tracking || "chưa xác định"})`;
+    for (const { location, reason, trackings } of pageIssues) {
+      const exact = batch.orders.filter(order => trackings.includes(order.tracking));
+      const candidates = exact.length ? exact : unmatched;
+      for (const order of candidates) reported.add(order.orderId);
+      batchIssues.push(
+        `${location}: ${reason}. Tracking trên tem: ${trackings.join(", ") || "chưa đọc được"}. ` +
+        (candidates.length
+          ? `${exact.length ? "Đơn liên quan" : "Đơn cần đối chiếu"}: ${candidates.map(describe).join("; ")}.`
+          : `Order ID: chưa xác định.${batch.orders.length
+            ? ` Đơn trong email: ${batch.orders.map(describe).join("; ")}.`
+            : ""}`),
+      );
+    }
+    for (const order of unmatched)
+      if (!reported.has(order.orderId))
+        batchIssues.push(`Chưa có tem khớp với ${describe(order)}.`);
+
+    for (const label of matches.values()) {
+      if (label && !files.has(label.orderId)) files.set(label.orderId, label);
     }
 
-    if (!batchIssues.length && matches.size && batch.confirmation)
-      confirmations.push(batch.confirmation);
     if (batchIssues.length) {
       issues.push(...batchIssues.map(issue => `Email ${index + 1} · ${issue}`));
       reviewFiles.push(...batchFiles);
     }
   }
 
-  if (entries.length) {
-    archive["danh-sach-label.csv"] = strToU8(exportManifest(entries));
-    if (issues.length) archive["can-kiem-tra.txt"] = strToU8(issues.join("\n"));
-  }
-  return {
-    zip: entries.length ? new Blob([zipSync(archive, { level: 0 })], { type: "application/zip" }) : null,
-    count: entries.length, issues, confirmations, reviewFiles,
-  };
+  return { files: [...files.values()], count: files.size, issues, reviewFiles };
 }
