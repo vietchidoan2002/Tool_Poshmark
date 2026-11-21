@@ -102,9 +102,12 @@ async function ocrPage(page, setStatus) {
 async function cropToPdf(page) {
   // Render at 300 DPI (bounded for oversized PDFs); keep the barcode's aspect ratio.
   const canvas = await renderPage(page, 300 / 72);
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  return exportLabelCanvas(canvas);
+}
+
+async function exportLabelCanvas(canvas, pixels) {
   const bounds = contentBounds(
-    ctx.getImageData(0, 0, canvas.width, canvas.height),
+    pixels || canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height),
   );
   if (!bounds) throw new Error("Trang trắng, không có nội dung label để xuất.");
   const blob = await new Promise((resolve) =>
@@ -272,6 +275,14 @@ function App() {
   });
   const [getBusy, setGetBusy] = useState(false);
   const [getOutput, setGetOutput] = useState("");
+  const [gmailLabels, setGmailLabels] = useState(null);
+  const [labelProgress, setLabelProgress] = useState("");
+  const [labelConfirmation, setLabelConfirmation] = useState("");
+  const [confirmingLabels, setConfirmingLabels] = useState(false);
+  const gmailLabelUrl = gmailLabels?.url;
+  useEffect(() => () => {
+    if (gmailLabelUrl) URL.revokeObjectURL(gmailLabelUrl);
+  }, [gmailLabelUrl]);
   const [configMsg, setConfigMsg] = useState("");
   const [jobs, setJobs] = useState([]);
   const [cutBusy, setCutBusy] = useState(false);
@@ -319,6 +330,8 @@ function App() {
         setSheetName(authUser.current ? savedSheetName(authUser.current) : "");
         setAccountName("");
         setGetOutput("");
+        setGmailLabels(null);
+        setLabelConfirmation("");
         setPhoneReady(false);
       }
       if (!session.authenticated) {
@@ -432,7 +445,7 @@ function App() {
     window.location.assign("/api/auth/start");
   }
   async function logout() {
-    if (cutBusy || getBusy) return;
+    if (cutBusy || getBusy || confirmingLabels) return;
     if (
       jobs.length &&
       !window.confirm(
@@ -464,7 +477,7 @@ function App() {
     }
   }
   function reloadVersion() {
-    if (cutBusy || getBusy) return;
+    if (cutBusy || getBusy || confirmingLabels) return;
     if (
       jobs.length &&
       !window.confirm(
@@ -504,7 +517,14 @@ function App() {
       return;
     }
 
+    if (getBusy || cutBusy || confirmingLabels) return;
+    if (gmailLabels?.url && gmailLabels.confirmations.length &&
+        !window.confirm("Bạn có muốn thay kết quả tem hiện tại bằng lượt mới?"))
+      return;
+    const userId = authUser.current;
     setGetBusy(true);
+    setGmailLabels(null);
+    setLabelConfirmation("");
     setGetOutput("Đang chạy Get Label…");
     try {
       const r = await fetch(API + "/api/get-label/run", {
@@ -514,19 +534,70 @@ function App() {
           accountName: accountName.trim(),
           sheetName: sheetName.trim(),
           tokenFile,
+          includeLabels: true,
         }),
       });
       const d = await r.json();
+      if (authUser.current !== userId) return;
       setGetOutput(d.output || d.error || "Không có log.");
       if (!r.ok)
         setGetOutput(
           (d.error || "Get Label thất bại.") + "\n" + (d.output || ""),
         );
+      const batches = d.labelBatches ?? d.partialStats?.labelBatches;
+      if (batches?.length) {
+        try {
+          setLabelProgress("Đang chuẩn bị PDF từ Gmail…");
+          const { prepareGmailLabels } = await import("./gmail-labels.js");
+          const { zip, ...labels } = await prepareGmailLabels(batches, {
+            openPdf: (data) => pdfjsLib.getDocument({ data, worker: getPdfWorker(), isEvalSupported: false }),
+            renderPage,
+            exportCanvas: exportLabelCanvas,
+            setStatus: setLabelProgress,
+          });
+          if (authUser.current === userId)
+            setGmailLabels({ ...labels, url: zip ? URL.createObjectURL(zip) : null });
+        } catch {
+          if (authUser.current === userId)
+            setGmailLabels({
+              issues: ["Không chuẩn bị được ZIP tem. Các email có PDF vẫn có thể xử lý lại."],
+              confirmations: [], reviewFiles: [], count: 0, url: null,
+            });
+        }
+      }
       await refresh();
     } catch (e) {
-      setGetOutput("Lỗi kết nối: " + e.message);
+      if (authUser.current === userId) setGetOutput("Lỗi kết nối: " + e.message);
     } finally {
+      setLabelProgress("");
       setGetBusy(false);
+    }
+  }
+  async function downloadGmailLabels() {
+    if (!gmailLabels?.url || confirmingLabels) return;
+    const userId = authUser.current;
+    triggerDownload({ url: gmailLabels.url, name: "poshmark-labels-4x6.zip" });
+    if (!gmailLabels.confirmations.length) return;
+    setConfirmingLabels(true);
+    try {
+      const response = await fetch(API + "/api/get-label/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmations: gmailLabels.confirmations }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error || "Chưa xác nhận được email.");
+      if (authUser.current === userId) {
+        setLabelConfirmation("Đã xác nhận các email đã ghép đủ tem.");
+        setGmailLabels(current => current?.url === gmailLabels.url
+          ? { ...current, confirmations: [] }
+          : current);
+      }
+    } catch (error) {
+      if (authUser.current === userId)
+        setLabelConfirmation(error.message);
+    } finally {
+      setConfirmingLabels(false);
     }
   }
   async function addFiles(fileList) {
@@ -1046,8 +1117,8 @@ function App() {
           <aside className="notice" role="note">
             <strong>Lưu ý</strong>
             <p>
-              Get Label ghi vào Google Sheets và đánh dấu email đã xử lý là
-              đã đọc. Kiểm tra đúng Gmail, Sheet và tên tab trước khi chạy.
+              Get Label ghi vào Google Sheets và lấy tem từ PDF đính kèm.
+              Email đã ghép đủ tem được đánh dấu đã đọc khi bạn tải ZIP.
             </p>
           </aside>
           <section className="runbox">
@@ -1061,6 +1132,8 @@ function App() {
             <button
               disabled={
                 getBusy ||
+                cutBusy ||
+                confirmingLabels ||
                 !phoneReady ||
                 !sheetId ||
                 !gmail.accounts?.length ||
@@ -1073,6 +1146,39 @@ function App() {
               {getBusy ? "Đang chạy…" : "Chạy Get Label"}
             </button>
           </section>
+          {labelProgress && <p className="status" role="status">{labelProgress}</p>}
+          {gmailLabels && (
+            <section className="configbox">
+              <h3>Tem từ Gmail</h3>
+              <p>{gmailLabels.count} tem đã khớp tracking</p>
+              <div className="inlineActions">
+                {gmailLabels.url && (
+                  <button onClick={downloadGmailLabels} disabled={getBusy || confirmingLabels}>
+                    Tải tem 4×6 (.zip)
+                  </button>
+                )}
+                {!!gmailLabels.reviewFiles.length && (
+                  <button
+                    className="secondary"
+                    disabled={cutBusy || getBusy || !!review}
+                    onClick={() => {
+                      navigatePage("cut");
+                      void addFiles(gmailLabels.reviewFiles);
+                    }}
+                  >
+                    Kiểm tra PDF trong Cut Label
+                  </button>
+                )}
+              </div>
+              {labelConfirmation && <p role="status">{labelConfirmation}</p>}
+              {!!gmailLabels.issues.length && (
+                <details open>
+                  <summary>Cần kiểm tra ({gmailLabels.issues.length})</summary>
+                  <ul>{gmailLabels.issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul>
+                </details>
+              )}
+            </section>
+          )}
           {getOutput && (
             <section className="logs">
               <div className="linehead">

@@ -1,6 +1,7 @@
 const { google } = require('googleapis');
 const cheerio = require('cheerio');
 const { createGoogleRequest } = require('./google-request.cjs');
+const { MAX_PDF_BYTES, pdfParts, trackingInOrder, loadLabelBatch } = require('./gmail-labels.cjs');
 
 function logLine(level, message) {
     const time = new Date().toLocaleTimeString('vi-VN', { hour12: false });
@@ -23,6 +24,12 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
     let writtenCount = 0;
     let writtenOrderCount = 0;
     let skippedCount = 0;
+    const labelBatches = options.includeLabels ? [] : null;
+    const labelBudget = { bytes: MAX_PDF_BYTES, files: 0 };
+    const stats = () => ({
+        writtenCount, writtenOrderCount, skippedCount,
+        ...(labelBatches ? { labelBatches } : {}),
+    });
     const gmail = options.gmail || google.gmail({ version: 'v1', auth });
     const sheets = options.sheets || google.sheets({ version: 'v4', auth });
     const request = options.request || createGoogleRequest({
@@ -65,12 +72,15 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
             throw sheetErr;
         }
 
-        const res = await request(requestOptions => gmail.users.messages.list({ userId: 'me', q: 'is:unread {"Order Number" "Order Date"}', maxResults: 25 }, requestOptions));
+        const query = labelBatches
+            ? 'is:unread {"Order Number" "Order Date" subject:"Your shipping labels are inside"}'
+            : 'is:unread {"Order Number" "Order Date"}';
+        const res = await request(requestOptions => gmail.users.messages.list({ userId: 'me', q: query, maxResults: 25 }, requestOptions));
         const messages = res.data.messages;
         
         if (!messages || messages.length === 0) {
             log("INFO", "Không có email mới cần xử lý.");
-            return { writtenCount, writtenOrderCount, skippedCount };
+            return stats();
         }
 
         log("INFO", `Tìm thấy ${messages.length} email chưa đọc.`);
@@ -79,6 +89,8 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
             const msgId = msg.id;
             const messageData = await request(requestOptions => gmail.users.messages.get({ userId: 'me', id: msgId }, requestOptions));
             const payload = messageData.data.payload;
+            const attachments = labelBatches ? pdfParts(payload) : [];
+            const labelOrders = [];
 
             const subjectHeader = (payload.headers || []).find(h => h.name.toLowerCase() === 'subject');
             const subjectTitle = subjectHeader ? subjectHeader.value : "Không rõ tiêu đề";
@@ -90,7 +102,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
             const plainBodies = [];
 
             function extractParts(part) {
-                if (part.body && part.body.data) {
+                if (part.body?.data && ['text/html', 'text/plain'].includes(part.mimeType)) {
                     const decoded = Buffer.from(
                         part.body.data.replace(/-/g, '+').replace(/_/g, '/'),
                         'base64'
@@ -155,7 +167,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                     const block = orderBlocks[i];
                     
                     let orderId = '';
-                    const orderMatch = block.match(/([a-fA-F0-9]{24})/);
+                    const orderMatch = block.match(/\b([a-fA-F0-9]{24})\b/);
                     if (orderMatch) orderId = orderMatch[1].trim().toLowerCase();
                     
                     if (!orderId) {
@@ -163,6 +175,9 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                         log("INFO", `  -> ⚠️ LỖI NHỎ: Bắt được Đơn nhưng không tìm thấy Mã Order ID (24 ký tự)!`);
                         continue;
                     }
+
+                    if (attachments.length)
+                        labelOrders.push({ orderId, tracking: trackingInOrder(block) });
 
                     // ==========================================
                     // KHIÊN CHỐNG TRÙNG LẶP ĐƠN HÀNG
@@ -262,17 +277,22 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                 }
             }
 
-            if (canMarkRead) await request(requestOptions => gmail.users.messages.modify({
+            if (attachments.length) {
+                labelBatches.push(await loadLabelBatch({
+                    gmail, request, messageId: msgId, parts: attachments, orders: labelOrders,
+                    budget: labelBudget, canMarkRead,
+                }));
+            } else if (canMarkRead) await request(requestOptions => gmail.users.messages.modify({
                 userId: 'me', id: msgId,
                 resource: { removeLabelIds: ['UNREAD'] }
             }, requestOptions));
         }
         if (res.data.nextPageToken) log('INFO', 'Còn email chưa xử lý. Chạy lại để tiếp tục (tối đa 25 email mỗi lần).');
         log("OK", `Hoàn tất account ${manualAccountName} | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount}`);
-        return { writtenCount, writtenOrderCount, skippedCount };
+        return stats();
 
     } catch (error) {
-        error.partialStats = { writtenCount, writtenOrderCount, skippedCount };
+        error.partialStats = stats();
         log("ERROR", `Dừng xử lý | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount} | ${error.message}`);
         throw error;
     }

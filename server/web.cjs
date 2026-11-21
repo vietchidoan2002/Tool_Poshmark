@@ -8,6 +8,8 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { google } = require("googleapis");
 const { createWebStore } = require("./web-store.cjs");
+const { createGoogleRequest } = require("./google-request.cjs");
+const { issueConfirmation, confirmedMessageId } = require("./gmail-labels.cjs");
 const {
   oauthDiagnostic,
   oauthFailurePage,
@@ -395,6 +397,63 @@ async function createWebApp(config, deps = {}) {
       res.json({ ok: true });
     }),
   );
+  function authorizeGmail(user, refreshWrites) {
+    const auth = oauth();
+    const { pm_connected_email, ...googleCredentials } = store.decrypt(user.tokens, user.id);
+    auth.setCredentials(googleCredentials);
+    auth.on("tokens", (tokens) => {
+      refreshWrites.push(
+        store.refresh(user.id, user.token_version, tokens).then(
+          () => true,
+          () => false,
+        ),
+      );
+    });
+    return auth;
+  }
+  function labelResponse(stats, user, completed) {
+    if (!stats?.labelBatches) return stats;
+    return {
+      ...stats,
+      labelBatches: stats.labelBatches.map(({ messageId, confirmable, ...batch }) => ({
+        ...batch,
+        ...(completed && confirmable
+          ? { confirmation: issueConfirmation(config.sessionSecret, user, messageId) }
+          : {}),
+      })),
+    };
+  }
+  app.post(
+    "/api/get-label/confirm",
+    asyncRoute(async (req, res) => {
+      const confirmations = req.body?.confirmations;
+      if (!Array.isArray(confirmations) || !confirmations.length || confirmations.length > 25)
+        return res.status(400).json({ error: "Danh sách xác nhận không hợp lệ." });
+      const user = await store.get(req.session.userId);
+      if (!user?.tokens)
+        return res.status(409).json({ error: "Hãy kết nối lại Gmail." });
+      const ids = confirmations.map(token => confirmedMessageId(config.sessionSecret, user, token));
+      if (ids.some(id => !id))
+        return res.status(409).json({ error: "Lượt xác nhận đã hết hạn hoặc tài khoản Gmail đã thay đổi." });
+
+      const refreshWrites = [];
+      try {
+        const auth = authorizeGmail(user, refreshWrites);
+        const gmail = deps.labelsGmailFactory?.(auth) || google.gmail({ version: "v1", auth });
+        const request = deps.labelsRequest || createGoogleRequest();
+        await request(options => gmail.users.messages.batchModify({
+          userId: "me",
+          resource: { ids: [...new Set(ids)], removeLabelIds: ["UNREAD"] },
+        }, options));
+        if ((await Promise.all(refreshWrites)).includes(false))
+          return res.status(502).json({ error: "Gmail đã xác nhận nhưng chưa lưu được token mới." });
+        return res.json({ ok: true });
+      } catch {
+        await Promise.allSettled(refreshWrites);
+        return res.status(502).json({ error: "Chưa xác nhận được email với Gmail. Bạn có thể tải lại và thử xác nhận lần nữa." });
+      }
+    }),
+  );
   app.post(
     "/api/get-label/run",
     asyncRoute(async (req, res) => {
@@ -436,23 +495,11 @@ async function createWebApp(config, deps = {}) {
       let runId, runStats;
       try {
         runId = await admin.usage.start(user.id, accountName);
-        const auth = oauth();
-        const { pm_connected_email, ...googleCredentials } = store.decrypt(
-          user.tokens,
-          user.id,
-        );
-        auth.setCredentials(googleCredentials);
-        auth.on("tokens", (tokens) => {
-          refreshWrites.push(
-            store.refresh(user.id, user.token_version, tokens).then(
-              () => true,
-              () => false,
-            ),
-          );
-        });
+        const auth = authorizeGmail(user, refreshWrites);
         const run = deps.runOrders || require("./bot.cjs").processOrders;
         const stats = await run(auth, accountName, sheetName, {
           spreadsheetId: user.sheet_id,
+          includeLabels: req.body?.includeLabels === true,
           log: (level, message) => logs.push(`[${level}] ${message}`),
         });
         runStats = stats;
@@ -461,7 +508,7 @@ async function createWebApp(config, deps = {}) {
             partialStats: stats,
           });
         await admin.usage.finish(runId, "success", stats);
-        res.json({ ok: true, ...stats, output: logs.join("\n") });
+        res.json({ ok: true, ...labelResponse(stats, user, true), output: logs.join("\n") });
       } catch (error) {
         await Promise.allSettled(refreshWrites);
         const partialStats = error.partialStats || runStats || null;
@@ -481,7 +528,7 @@ async function createWebApp(config, deps = {}) {
           ok: false,
           error:
             "Chưa hoàn tất. Có thể cần kết nối lại Google hoặc thử lại sau. Các dòng đã ghi vẫn được giữ.",
-          partialStats,
+          partialStats: labelResponse(partialStats, user, false),
           output: logs.join("\n"),
         });
       } finally {

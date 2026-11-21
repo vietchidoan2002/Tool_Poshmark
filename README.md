@@ -25,6 +25,12 @@ Cut Label orders native PDF text using page coordinates. For scanned labels, it 
 
 The automated regression tests mock Google APIs and do not read or change your inbox or Sheets. They cover rate-limit retries, partial failures, duplicate detection, PDF text order, ID extraction and OCR confidence handling.
 
+## Get Label: shipping PDFs from Gmail
+
+**Chạy Get Label** imports orders into Sheets and collects the shipping PDFs attached to the same emails. The browser reads USPS Code 128 barcodes and matches each page against the tracking numbers listed alongside Order IDs in its own email. A PDF can contain multiple pages in any order. There is no OCR step in this automatic flow.
+
+Download matched 4×6 labels in a ZIP with a CSV manifest. Orders already in Sheets can still supply labels. Unread emails with attached PDFs are marked read when the ZIP download is requested, for emails whose pages and orders all matched. Mismatches, unreadable codes, and pages with multiple USPS barcodes are listed under **Cần kiểm tra** and can be opened in Cut Label. Each run can collect up to 50 PDFs (8 MiB total) and scan up to 80 pages.
+
 ## Cut Label: filenames, tracking, and exports
 
 1. Upload one or more PDFs (up to 100 MB per file). File names must end in `.pdf`. Corrupt or password-protected files are listed separately; valid neighboring files remain available. Unlock password-protected PDFs before importing them.
