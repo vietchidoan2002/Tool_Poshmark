@@ -534,7 +534,6 @@ async function createWebApp(config, deps = {}) {
 }
 
 if (require.main === module) {
-  process.env.APP_MODE = "web";
   const { databaseOptions } = require("./web-config.cjs");
   let poolOptions;
   try {

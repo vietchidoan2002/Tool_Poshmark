@@ -1,28 +1,11 @@
-const fs = require('fs');
-const path = require('path');
 const { google } = require('googleapis');
 const cheerio = require('cheerio');
 const { createGoogleRequest } = require('./google-request.cjs');
-
-const ROOT = path.resolve(__dirname, '..');
-const CONFIG_PATH = path.join(ROOT, 'config.json');
-const CREDENTIALS_PATH = path.join(ROOT, 'credentials.json');
-const APP_CONFIG = process.env.APP_MODE !== 'web' && fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
-const SPREADSHEET_ID = String(APP_CONFIG.sheetId || '').trim();
 
 function logLine(level, message) {
     const time = new Date().toLocaleTimeString('vi-VN', { hour12: false });
     const labels = { INFO: 'INFO', SCAN: 'SCAN', ORDER: 'ORDER', OK: 'DONE', SKIP: 'SKIP', WARN: 'WARN', ERROR: 'ERROR' };
     console.log(`[${time}] ${labels[level] || level}  ${message}`);
-}
-
-async function authorize(tokenPath) {
-    const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf-8'));
-    const key = credentials.installed || credentials.web;
-    const oAuth2Client = new google.auth.OAuth2(key.client_id, key.client_secret, 'http://localhost:3210/oauth2callback');
-    const token = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
-    oAuth2Client.setCredentials(token);
-    return oAuth2Client;
 }
 
 function formatMockupUrl(url) {
@@ -36,7 +19,7 @@ function formatMockupUrl(url) {
 
 async function processOrders(auth, manualAccountName, sheetName, options = {}) {
     const log = options.log || logLine;
-    const spreadsheetId = options.spreadsheetId || SPREADSHEET_ID;
+    const { spreadsheetId } = options;
     let writtenCount = 0;
     let writtenOrderCount = 0;
     let skippedCount = 0;
@@ -295,36 +278,4 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
     }
 }
 
-async function main() {
-    logLine("INFO", "Khởi động Get Label.");
-
-    const sheetName = String(process.env.PM_SHEET_NAME || "").trim();
-    const accountName = String(process.env.PM_ACCOUNT_NAME || "").trim();
-    const tokenFile = String(process.env.PM_TOKEN_FILE || "").trim();
-
-    if (!SPREADSHEET_ID) throw new Error("Thiếu sheetId trong config.json.");
-    if (!sheetName) throw new Error("Thiếu tên tab Google Sheets.");
-    if (!accountName) throw new Error("Thiếu tên account Poshmark.");
-    if (!/^token_.+\.json$/i.test(tokenFile)) throw new Error("Tên file token Gmail không hợp lệ.");
-
-    const tokenPath = path.join(ROOT, tokenFile);
-    if (!fs.existsSync(tokenPath)) throw new Error(`Không tìm thấy token Gmail: ${tokenFile}`);
-    if (!fs.existsSync(CREDENTIALS_PATH)) throw new Error("Không tìm thấy credentials.json trong thư mục gốc.");
-
-    try {
-        const auth = await authorize(tokenPath);
-        const stats = await processOrders(auth, accountName, sheetName);
-        logLine("OK", `GET LABEL HOÀN TẤT | Account: ${accountName} | Đã ghi: ${stats?.writtenCount ?? 0} | Bỏ qua: ${stats?.skippedCount ?? 0}`);
-        console.log("────────────────────────────────────────────────");
-    } catch (err) {
-        logLine("ERROR", `Get Label thất bại: ${err.message}`);
-        process.exitCode = 1;
-    }
-}
-
 module.exports = { processOrders };
-
-if (require.main === module) main().catch(error => {
-    logLine("ERROR", `Get Label thất bại: ${error.message}`);
-    process.exitCode = 1;
-});

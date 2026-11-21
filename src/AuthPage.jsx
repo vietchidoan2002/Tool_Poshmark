@@ -175,7 +175,7 @@ export default function AuthPage({
       <header className="top">
         <BrandLogo />
         <div className="headcopy">
-          <h1>Poshmark Label Manager</h1>
+          <h1>Poshmark Label Tool</h1>
           <p>Tài khoản của bạn. Dữ liệu của riêng bạn.</p>
         </div>
       </header>
@@ -416,7 +416,7 @@ export default function AuthPage({
           </button>
         )}
       </main>
-      <footer>Poshmark Label Manager · Công cụ quản lý label miễn phí</footer>
+      <footer>Poshmark Label Tool · Công cụ quản lý label miễn phí</footer>
     </div>
   );
 }
@@ -469,7 +469,7 @@ export function ActivationPage({ onLogout, onRefresh, logoutError }) {
       <header className="top signed-in">
         <BrandLogo />
         <div className="headcopy">
-          <h1>Poshmark Label Manager</h1>
+          <h1>Poshmark Label Tool</h1>
           <p>Kích hoạt tài khoản để bắt đầu.</p>
         </div>
         <div className="header-account-actions">

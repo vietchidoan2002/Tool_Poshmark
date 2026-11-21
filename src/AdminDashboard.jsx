@@ -33,97 +33,77 @@ function Metric({ label, value, note, tone = "" }) {
     </article>
   );
 }
-function Trend({ rows }) {
-  const [selected, setSelected] = useState(null);
-  const maximum = Math.max(1, ...rows.map((row) => row.orders));
+function dayLabel(day) {
+  return day.split("-").reverse().join("/");
+}
+function Trend({ rows, peakOrders }) {
+  const [selectedDay, setSelectedDay] = useState(null);
+  const selected = rows.find((row) => row.day === selectedDay) || rows.at(-1);
   return (
     <section className="admin-card">
       <div className="admin-card-title">
-        <h3>Xu hướng đơn Get Label</h3>
-        <span className="pill">Theo ngày · giờ Việt Nam</span>
+        <h3>Số lượng đơn trong 1 ngày</h3>
+        <span className="pill">Giờ Việt Nam</span>
       </div>
-      {!rows.length ? (
-        <p className="admin-empty">Chưa có lượt Get Label trong khoảng này.</p>
+      {!selected ? (
+        <p className="admin-empty">Chưa ghi nhận hoạt động trong khoảng này.</p>
       ) : (
         <>
           <div className="trend-bars" aria-label="Biểu đồ số đơn theo ngày">
             {rows.map((row) => (
               <button
                 key={row.day}
-                className="trend-column"
-                aria-label={`${row.day}: ${row.orders} đơn, ${row.runs} lượt Get Label`}
-                title={`${row.day}: ${number(row.orders)} đơn`}
-                onMouseEnter={() => setSelected(row)}
-                onFocus={() => setSelected(row)}
-                onClick={() => setSelected(row)}
+                className={
+                  peakOrders > 0 && row.orders === peakOrders
+                    ? "trend-column trend-peak"
+                    : "trend-column"
+                }
+                aria-label={`${dayLabel(row.day)} · ${number(row.orders)} đơn`}
+                aria-pressed={row.day === selected.day}
+                title={`${dayLabel(row.day)} · ${number(row.orders)} đơn`}
+                onClick={() => setSelectedDay(row.day)}
               >
                 <span
                   className="trend-bar"
                   style={{
-                    height: Math.max(4, (100 * row.orders) / maximum) + "%",
+                    height: Math.max(4, (100 * row.orders) / Math.max(1, peakOrders)) + "%",
                   }}
                 />
-                <small>{row.day.slice(5).split("-").reverse().join("/")}</small>
+                <small>{dayLabel(row.day).slice(0, 5)}</small>
               </button>
             ))}
           </div>
-          <p className="hint" role="status">
-            {selected
-              ? `${selected.day}: ${number(selected.orders)} đơn · ${number(selected.runs)} lượt Get Label`
-              : "Chọn một cột để xem số liệu trong ngày."}
+          <p className="trend-selection" role="status">
+            <strong>{number(selected.orders)} đơn</strong>
+            <span>Ngày {dayLabel(selected.day)}</span>
           </p>
         </>
       )}
     </section>
   );
 }
-function Insights({ data }) {
-  const { users: u, usage: r } = data;
-  const enough =
-    Date.now() - new Date(data.trackingSince).getTime() >= 14 * 86400000;
-  const suggestions = [];
-  if (!enough)
-    suggestions.push("Cần đủ 14 ngày ghi nhận để so sánh tăng trưởng tuần.");
-  else if (u.previous7 > 0)
-    suggestions.push(
-      `Tài khoản mới trong 7 ngày: ${u.new7 >= u.previous7 ? "+" : ""}${Math.round((100 * (u.new7 - u.previous7)) / u.previous7)}% so với 7 ngày trước.`,
-    );
-  else
-    suggestions.push(
-      u.new7
-        ? "Đã bắt đầu có tài khoản mới trong tuần này."
-        : "Chưa có tài khoản mới trong 7 ngày qua.",
-    );
-  if (u.available - u.verified > 0)
-    suggestions.push(
-      `${number(u.available - u.verified)} tài khoản chưa xác nhận email: ưu tiên hướng dẫn kích hoạt.`,
-    );
-  if (u.available - u.gmailConnected > 0)
-    suggestions.push(
-      `${number(u.available - u.gmailConnected)} tài khoản chưa kết nối Gmail: cải thiện bước hướng dẫn Gmail/Sheets.`,
-    );
-  if (
-    r.successful + r.failed > 0 &&
-    r.failed / (r.successful + r.failed) >= 0.1
-  )
-    suggestions.push(
-      `${Math.round((100 * r.failed) / (r.successful + r.failed))}% lượt Get Label đã chốt gặp lỗi: kiểm tra lịch sử lỗi trước khi mở rộng người dùng.`,
-    );
-  if (data.days === 30 && u.active30 > r.getUsers)
-    suggestions.push(
-      "Có người dùng mở web nhưng chưa chạy Get Label; kiểm tra xem họ cần hướng dẫn cấu hình hay đang dùng Cut Label.",
-    );
+function Insights({ rows, peakOrders }) {
+  const peakDays =
+    peakOrders > 0
+      ? rows.filter((row) => row.orders === peakOrders).map((row) => dayLabel(row.day))
+      : [];
+  const shownDays = peakDays.slice(0, 3).join(", ");
+  const remainingDays = peakDays.length - 3;
   return (
     <section className="admin-card growth-card">
       <h3>Gợi ý phát triển</h3>
-      <p className="hint">
-        Dựa trên hoạt động ghi nhận, không phải dự báo doanh thu.
-      </p>
-      <ul>
-        {suggestions.map((text) => (
-          <li key={text}>{text}</li>
-        ))}
-      </ul>
+      {peakDays.length ? (
+        <div className="growth-peak">
+          <p>{peakDays.length === 1 ? "Ngày có nhiều đơn nhất" : "Các ngày cùng dẫn đầu"}</p>
+          <strong>{number(peakOrders)} đơn{peakDays.length > 1 ? "/ngày" : ""}</strong>
+          <span>
+            {shownDays}
+            {remainingDays > 0 ? ` và ${number(remainingDays)} ngày khác` : ""}
+          </span>
+        </div>
+      ) : (
+        <p className="hint">Chưa ghi nhận đơn để xác định ngày dẫn đầu.</p>
+      )}
     </section>
   );
 }
@@ -337,8 +317,6 @@ function Details({ id, onClose }) {
           <p>{data.user.email}</p>
           <div className="admin-detail-metrics">
             <span>{number(data.user.orders)} đơn ghi được</span>
-            <span>{number(data.user.getRuns)} lượt Get Label</span>
-            <span>{data.user.gmailCount} Gmail</span>
             <span>{number(data.user.poshmarkCount)} account Poshmark</span>
           </div>
           <h4>Account Poshmark đã sử dụng</h4>
@@ -348,18 +326,14 @@ function Details({ id, onClose }) {
                 <thead>
                   <tr>
                     <th>Account</th>
-                    <th>Lượt Get</th>
                     <th>Đơn ghi được</th>
-                    <th>Bỏ qua</th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.accounts.map((account) => (
                     <tr key={account.name}>
                       <td>{account.name}</td>
-                      <td>{number(account.runs)}</td>
                       <td>{number(account.orders)}</td>
-                      <td>{number(account.skipped)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -378,7 +352,6 @@ function Details({ id, onClose }) {
                     <th>Account</th>
                     <th>Kết quả</th>
                     <th>Đơn</th>
-                    <th>Bỏ qua</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -397,7 +370,6 @@ function Details({ id, onClose }) {
                         </span>
                       </td>
                       <td>{number(run.orders)}</td>
-                      <td>{number(run.skipped)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -501,6 +473,7 @@ export default function AdminDashboard() {
       setBusy(false);
     }
   }
+  const peakOrders = Math.max(0, ...(dashboard?.trend || []).map((row) => row.orders));
   return (
     <main className="admin-dashboard">
       <section className="admin-hero">
@@ -622,8 +595,8 @@ export default function AdminDashboard() {
             />
           </section>
           <div className="admin-insights">
-            <Trend rows={dashboard.trend} />
-            <Insights data={dashboard} />
+            <Trend rows={dashboard.trend} peakOrders={peakOrders} />
+            <Insights rows={dashboard.trend} peakOrders={peakOrders} />
           </div>
         </>
       )}
@@ -674,10 +647,8 @@ export default function AdminDashboard() {
               <tr>
                 <th>Tài khoản</th>
                 <th>Trạng thái</th>
-                <th>Gmail</th>
                 <th>ACC Poshmark</th>
                 <th>Đơn Get</th>
-                <th>Lượt Get</th>
                 <th>Hoạt động gần nhất</th>
                 <th>Thao tác</th>
               </tr>
@@ -703,12 +674,10 @@ export default function AdminDashboard() {
                     </span>
                     {!user.emailVerified && <small>Chưa xác nhận email</small>}
                   </td>
-                  <td>{user.gmailCount}</td>
                   <td>{number(user.poshmarkCount)}</td>
                   <td>
                     <strong>{number(user.orders)}</strong>
                   </td>
-                  <td>{number(user.getRuns)}</td>
                   <td>{date(user.lastSeenAt)}</td>
                   <td>
                     <div className="table-actions">
@@ -762,9 +731,7 @@ export default function AdminDashboard() {
           <p className="admin-empty">Không có tài khoản phù hợp.</p>
         )}
         <p className="hint admin-count-note">
-          Gmail là kết nối đang lưu trên website. ACC Poshmark là số tên account
-          đã dùng khi chạy Get Label, không phải số tài khoản đã được Poshmark
-          xác minh.
+          ACC Poshmark đếm số tên account đã dùng khi chạy Get Label.
         </p>
         <div className="admin-pagination">
           <button

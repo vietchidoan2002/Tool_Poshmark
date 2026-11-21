@@ -1,11 +1,30 @@
-# Free static preview: no database, no Google credentials, no server-side APIs.
+# Full web on Render Free + an external Neon Free PostgreSQL database.
+# No paid database or paid Render plan is declared here.
 services:
   - type: web
-    name: poshmark-label-preview
-    runtime: static
+    name: poshmark-label-web
+    runtime: node
     branch: preview/ui-single-pass-ocr
-    buildCommand: npm ci --include=dev && npm run build:preview
-    staticPublishPath: ./dist
+    plan: free
+    buildCommand: npm ci --include=dev && npm test && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
     envVars:
-      - key: VITE_PREVIEW_ONLY
-        value: "true"
+      - key: NODE_ENV
+        value: production
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: REQUIRE_REVIEWED_PHONE
+        value: "false"
+      - key: PG_POOL_MAX
+        value: "4"
+      - key: DATABASE_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: TOKEN_ENCRYPTION_KEY
+        generateValue: true

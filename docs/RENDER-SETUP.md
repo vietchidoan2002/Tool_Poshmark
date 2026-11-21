@@ -1,6 +1,6 @@
 # Gmail/Sheets trên gói miễn phí: Render Free + Neon Free
 
-Bản Static Site đang dùng không có API phía máy chủ, nên không thể bật Gmail chỉ bằng bỏ dòng thông báo. Tạo một Web Service gói **Free**, dùng PostgreSQL gói **Free** của Neon. Cấu hình nằm ở render.web.yaml trên nhánh preview/ui-single-pass-ocr; không đổi master. Không tạo Render PostgreSQL hoặc chọn plan trả phí.
+Website chạy trên Render Web Service gói **Free** và PostgreSQL gói **Free** của Neon. Cấu hình nằm trong `render.yaml` trên nhánh `preview/ui-single-pass-ocr`.
 
 ## 1. Tạo cơ sở dữ liệu Neon Free
 
@@ -18,14 +18,14 @@ Bản Static Site đang dùng không có API phía máy chủ, nên không thể
 
 ## 3. Tạo Render Web Service Free
 
-Chọn **New → Web Service**, kết nối repo vietchidoan2002/Tool_Poshmark. Đây là dịch vụ mới; Static Site cũ vẫn chỉ là Cut Label.
+Chọn **New → Web Service**, kết nối repo vietchidoan2002/Tool_Poshmark. Dịch vụ hiện có có thể cập nhật lệnh build và start theo bảng bên dưới.
 
 | Mục | Giá trị |
 | --- | --- |
 | Branch | preview/ui-single-pass-ocr |
 | Runtime | Node |
-| Build Command | npm ci --include=dev && npm test && npm run build:web |
-| Start Command | npm run start:web |
+| Build Command | npm ci --include=dev && npm test && npm run build |
+| Start Command | npm start |
 | Instance Type | Free |
 | Health Check Path | /healthz |
 
@@ -34,7 +34,6 @@ Thêm Environment Variables:
 | Tên | Nội dung |
 | --- | --- |
 | NODE_ENV | production |
-| APP_MODE | web |
 | PG_POOL_MAX | 4 |
 | DATABASE_URL | Connection string Neon trực tiếp |
 | GOOGLE_CLIENT_ID | OAuth Web Client ID |
@@ -44,7 +43,6 @@ Thêm Environment Variables:
 
 Dùng nút tạo giá trị ngẫu nhiên nếu giao diện có. Có thể tạo tại máy của bạn bằng Node: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` — chạy hai lần, mỗi kết quả dùng cho một khóa. Không gửi kết quả qua chat. Giữ nguyên hai khóa này qua các lần deploy sau, nếu không sẽ mất phiên đăng nhập hoặc không đọc được token đã lưu.
 
-Không đặt VITE_PREVIEW_ONLY=true cho Web Service. Script build:web cũng chủ động bỏ cờ xem thử. Khi Render hiển thị Instance Free và không yêu cầu chấp thuận dịch vụ trả phí, hãy tạo service.
 
 ## 4. Callback Google
 
@@ -54,7 +52,7 @@ Khi Render cấp URL, ví dụ https://ten-web.onrender.com, thêm vào **Author
 
 Dùng đúng tên miền thật. Mặc định máy chủ lấy RENDER_EXTERNAL_HOSTNAME; nếu có custom domain thì đặt PUBLIC_BASE_URL bằng origin HTTPS của tên miền đó và đăng ký callback tương ứng.
 
-Mở **URL Web Service mới**, không dùng URL Static Site cũ. Trang đầu là **Đăng nhập**. Có form đăng ký email/mật khẩu/SĐT và tùy chọn **Tiếp tục với Google** cho tài khoản cũ. Tài khoản mới phải xác nhận email mới vào công cụ. Mỗi người đăng nhập tài khoản riêng và tự lưu Sheet ID. Không upload credentials.json hay token_*.json lên web.
+Mở **URL Web Service**. Trang đầu là **Đăng nhập**. Có form đăng ký email/mật khẩu/SĐT và tùy chọn **Tiếp tục với Google** cho tài khoản cũ. Tài khoản mới phải xác nhận email mới vào công cụ. Mỗi người đăng nhập tài khoản riêng và tự lưu Sheet ID. Không upload credentials.json hay token_*.json lên web.
 
 ## 5. Kiểm tra trước khi mời nhiều người
 
@@ -62,7 +60,7 @@ Mở **URL Web Service mới**, không dùng URL Static Site cũ. Trang đầu l
 - Đăng nhập hai tài khoản Test users bằng hai trình duyệt; kiểm tra Sheet ID, Gmail và trạng thái đăng xuất không xuất hiện chéo.
 - Chạy Get Label chỉ trên dữ liệu được cho phép: ghi Sheets và đánh dấu email đã xử lý là đã đọc.
 - Kiểm tra sau khi Web Service/Neon ngủ rồi thức lại; kiểm tra dữ liệu còn sau redeploy.
-- Cut Label chạy trong trình duyệt sau khi đăng nhập và xác nhận email; không tải vận đơn lên máy chủ. Static Site xem thử vẫn dùng Cut Label không cần tài khoản.
+- Cut Label chạy trong trình duyệt sau khi đăng nhập và xác nhận email; không tải vận đơn lên máy chủ.
 
 ## Giới hạn miễn phí
 
@@ -78,7 +76,7 @@ Kiểm thử tự động dùng Google giả lập và PostgreSQL trong bộ nh�
 
 ## Quản lý số điện thoại
 
-Trong Environment của **Web Service** (không phải Static Site):
+Trong Environment của **Web Service**:
 
 - `ADMIN_EMAILS`: email tài khoản đã xác minh của bạn; nếu có nhiều quản trị viên, phân cách bằng dấu phẩy. Không có danh sách này thì không ai được dùng API quản trị. Không cấp quyền bằng dữ liệu người dùng gửi lên.
 - `REQUIRE_REVIEWED_PHONE=false` (mặc định mới): kích hoạt bằng email, thu số ngay khi đăng ký và kiểm tra thủ công sau. Với dịch vụ cũ đã đặt true, cần đổi thủ công trong Render Environment rồi deploy lại.
@@ -100,7 +98,7 @@ Nên sửa qua giao diện để áp dụng chuẩn hóa, kiểm tra trùng và 
 
 ## Trang đăng nhập/đăng ký riêng
 
-Bản web có các form email/mật khẩu và vẫn có tùy chọn Google cho tài khoản cũ. Xem EMAIL-PASSWORD-AUTH.md. Để gửi xác nhận và khôi phục qua Gmail quản trị, đăng nhập Google bằng tài khoản trong ADMIN_EMAILS trước, rồi thêm AUTH_MAIL_PROVIDER=gmail và AUTH_MAIL_SENDER_EMAIL bằng email quản trị đã kết nối, deploy lại. Không cần đổi SESSION_SECRET hoặc TOKEN_ENCRYPTION_KEY. Chưa cấu hình gửi email thì các chức năng cần xác nhận email chưa sử dụng được; bản Static Site không có chức năng tài khoản này.
+Bản web có các form email/mật khẩu và vẫn có tùy chọn Google cho tài khoản cũ. Xem EMAIL-PASSWORD-AUTH.md. Để gửi xác nhận và khôi phục qua Gmail quản trị, đăng nhập Google bằng tài khoản trong ADMIN_EMAILS trước, rồi thêm AUTH_MAIL_PROVIDER=gmail và AUTH_MAIL_SENDER_EMAIL bằng email quản trị đã kết nối, deploy lại. Không cần đổi SESSION_SECRET hoặc TOKEN_ENCRYPTION_KEY. Chưa cấu hình gửi email thì các chức năng cần xác nhận email chưa sử dụng được.
 
 ## Dashboard quản trị
 

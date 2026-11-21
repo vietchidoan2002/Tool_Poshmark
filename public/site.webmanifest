@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "Poshmark Label Manager",
-  "short_name": "Label Manager",
+  "name": "Poshmark Label Tool",
+  "short_name": "Label Tool",
   "lang": "vi",
   "start_url": "/",
   "scope": "/",

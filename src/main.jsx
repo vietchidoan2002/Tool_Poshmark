@@ -43,8 +43,19 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
 let sharedPdfWorker;
 const getPdfWorker = () => (sharedPdfWorker ||= new pdfjsLib.PDFWorker());
-const PREVIEW_ONLY = import.meta.env.VITE_PREVIEW_ONLY === "true";
-const API = ""; // Same-origin API; Vite proxies local development requests.
+const API = ""; // Same-origin API.
+
+function sheetNameStorageKey(userId) {
+  return `pm_default_sheet_name:${userId}`;
+}
+
+function savedSheetName(userId) {
+  try {
+    return localStorage.getItem(sheetNameStorageKey(userId)) ?? "";
+  } catch {
+    return "";
+  }
+}
 
 async function renderPage(page, scale = 3) {
   const base = page.getViewport({ scale: 1 });
@@ -234,16 +245,15 @@ function App() {
     await refresh();
   }
   const [page, setPage] = useState(
-    PREVIEW_ONLY ? "cut" : window.location.hash === "#/admin" ? "admin" : "get",
+    window.location.hash === "#/admin" ? "admin" : "get",
   );
   function navigatePage(value) {
     setPage(value);
     window.history.pushState(null, "", "#/" + value);
   }
-  const [webMode, setWebMode] = useState(PREVIEW_ONLY);
   const [authenticated, setAuthenticated] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [sessionReady, setSessionReady] = useState(PREVIEW_ONLY);
+  const [sessionReady, setSessionReady] = useState(false);
   const [emailVerified, setEmailVerified] = useState(false);
   const [authError, setAuthError] = useState("");
   const [logoutError, setLogoutError] = useState("");
@@ -254,9 +264,7 @@ function App() {
   const [sheetId, setSheetId] = useState("");
   const sheetDraft = useRef(null);
   const [accountName, setAccountName] = useState("");
-  const [sheetName, setSheetName] = useState(
-    () => localStorage.getItem("pm_default_sheet_name") || "",
-  );
+  const [sheetName, setSheetName] = useState("");
   const [tokenFile, setTokenFile] = useState("");
   const [gmail, setGmail] = useState({
     accounts: [],
@@ -288,51 +296,47 @@ function App() {
     [],
   );
   async function refresh() {
-    if (PREVIEW_ONLY) return;
     const generation = ++refreshGeneration.current;
     try {
       const sessionResponse = await fetch(API + "/api/session");
       if (!sessionResponse.ok) throw new Error("Session unavailable");
       const session = await sessionResponse.json();
       if (
-        typeof session.webMode !== "boolean" ||
+        session.webMode !== true ||
         typeof session.authenticated !== "boolean"
       )
         throw new Error("Invalid session response");
       if (generation !== refreshGeneration.current) return;
       setAuthError("");
-      setWebMode(!!session.webMode);
       setAuthenticated(!!session.authenticated);
       setIsAdmin(!!session.authenticated && session.isAdmin === true);
       setEmailVerified(session.emailVerified === true);
       setSessionReady(true);
-      if (session.webMode && authUser.current !== session.userId) {
+      if (authUser.current !== session.userId) {
         authUser.current = session.userId || null;
         sheetDraft.current = null;
         setSheetId("");
-        setSheetName("");
+        setSheetName(authUser.current ? savedSheetName(authUser.current) : "");
         setAccountName("");
         setGetOutput("");
         setPhoneReady(false);
       }
-      if (session.webMode && !session.authenticated) {
+      if (!session.authenticated) {
         setGmail({ credentialsPresent: true, accounts: [] });
         setTokenFile("");
         return;
       }
-      if (session.webMode && !session.emailVerified) return;
+      if (!session.emailVerified) return;
       const [c, g, profile] = await Promise.all([
         fetch(API + "/api/config").then((r) => r.json()),
         fetch(API + "/api/gmail/status").then((r) => r.json()),
-        session.webMode
-          ? fetch(API + "/api/profile").then((r) => {
-              if (!r.ok) throw Error("Profile unavailable");
-              return r.json();
-            })
-          : null,
+        fetch(API + "/api/profile").then((r) => {
+          if (!r.ok) throw Error("Profile unavailable");
+          return r.json();
+        }),
       ]);
       if (generation !== refreshGeneration.current) return;
-      if (profile) setPhoneReady(!profile.phoneRequired || profile.reviewed);
+      setPhoneReady(!profile.phoneRequired || profile.reviewed);
       if (sheetDraft.current === null)
         setSheetId(
           c.sheetId === "PASTE_GOOGLE_SHEET_ID_HERE" ? "" : c.sheetId || "",
@@ -381,13 +385,18 @@ function App() {
 
   function changeSheetName(value) {
     setSheetName(value);
-    if (!webMode) localStorage.setItem("pm_default_sheet_name", value);
+    const userId = authUser.current;
+    if (!userId) return;
+    try {
+      localStorage.setItem(sheetNameStorageKey(userId), value);
+    } catch {
+      // Editing still works when browser storage is unavailable.
+    }
   }
 
   useEffect(() => {
     refresh();
     const checkVersion = async () => {
-      if (PREVIEW_ONLY) return;
       try {
         const response = await fetch("/api/version", { cache: "no-store" });
         const data = await response.json();
@@ -413,16 +422,14 @@ function App() {
     };
   }, []);
   function connectGoogle() {
-    if (webMode) {
-      if (
-        jobs.length &&
-        !window.confirm(
-          "Đăng nhập Google sẽ tải lại trang và xóa danh sách PDF đang mở. Tiếp tục?",
-        )
+    if (
+      jobs.length &&
+      !window.confirm(
+        "Đăng nhập Google sẽ tải lại trang và xóa danh sách PDF đang mở. Tiếp tục?",
       )
-        return;
-      window.location.assign("/api/auth/start");
-    } else window.open("/api/auth/start", "_blank", "noopener,noreferrer");
+    )
+      return;
+    window.location.assign("/api/auth/start");
   }
   async function logout() {
     if (cutBusy || getBusy) return;
@@ -755,37 +762,36 @@ function App() {
       setReview({ entries, batch });
     else runExport(entries, batch);
   }
-  if (!PREVIEW_ONLY && !sessionReady)
+  if (!sessionReady)
     return (
       <div className="auth-shell">
         <main className="auth-card" aria-busy={!authError}>
-          <h1>Poshmark Label Manager</h1>
+          <h1>Poshmark Label Tool</h1>
           <p role="status">{authError || "Đang kiểm tra phiên đăng nhập…"}</p>
           {authError && <button onClick={refresh}>Thử lại kết nối</button>}
         </main>
       </div>
     );
-  const requiredAuth = !PREVIEW_ONLY && webMode && !authenticated;
-  if ((authView || requiredAuth) && !PREVIEW_ONLY)
+  if (authView || !authenticated)
     return (
       <AuthPage
         mode={
-          authView === "verify-email" && requiredAuth
+          authView === "verify-email" && !authenticated
             ? "login"
             : authView || "login"
         }
         verificationPending={verifyPending.current}
         token={authToken.current}
         onNavigate={openAuth}
-        onBack={!webMode || authenticated ? () => openAuth(null) : undefined}
+        onBack={authenticated ? () => openAuth(null) : undefined}
         backLabel={
-          webMode && !emailVerified ? "← Quay lại tài khoản" : undefined
+          !emailVerified ? "← Quay lại tài khoản" : undefined
         }
         onAuth={authCompleted}
         onGoogle={connectGoogle}
       />
     );
-  if (!PREVIEW_ONLY && webMode && !emailVerified)
+  if (!emailVerified)
     return (
       <ActivationPage
         key={authUser.current}
@@ -796,62 +802,49 @@ function App() {
     );
   return (
     <div className="app">
-      <header
-        className={"top" + (webMode && authenticated ? " signed-in" : "")}
-      >
+      <header className="top signed-in">
         <BrandLogo />
         <div className="headcopy">
-          <h1>Poshmark Label Manager</h1>
-          <p>Đơn hàng gọn gàng. Label sẵn sàng.</p>
+          <h1>Poshmark Label Tool</h1>
         </div>
-        {webMode && authenticated && (
-          <div className="header-account-actions">
-            {isAdmin && (
-              <button
-                className={
-                  page === "admin" ? "profile-link active" : "secondary"
-                }
-                onClick={() => navigatePage("admin")}
-                aria-pressed={page === "admin"}
-              >
-                Quản trị
-              </button>
-            )}
+        <div className="header-account-actions">
+          {isAdmin && (
             <button
               className={
-                page === "profile"
-                  ? "profile-link active"
-                  : "secondary profile-link"
+                page === "admin" ? "profile-link active" : "secondary"
               }
-              onClick={() => navigatePage("profile")}
-              aria-pressed={page === "profile"}
+              onClick={() => navigatePage("admin")}
+              aria-pressed={page === "admin"}
             >
-              Hồ sơ
+              Quản trị
             </button>
-            <button
-              className="secondary"
-              onClick={logout}
-              disabled={getBusy || cutBusy}
-            >
-              Đăng xuất
-            </button>
-          </div>
-        )}
-        {!PREVIEW_ONLY && webMode && !authenticated && (
-          <div className="account-actions">
-            <button className="secondary" onClick={() => openAuth("login")}>
-              Đăng nhập
-            </button>
-            <button onClick={() => openAuth("register")}>Đăng ký</button>
-          </div>
-        )}
+          )}
+          <button
+            className={
+              page === "profile"
+                ? "profile-link active"
+                : "secondary profile-link"
+            }
+            onClick={() => navigatePage("profile")}
+            aria-pressed={page === "profile"}
+          >
+            Hồ sơ
+          </button>
+          <button
+            className="secondary"
+            onClick={logout}
+            disabled={getBusy || cutBusy}
+          >
+            Đăng xuất
+          </button>
+        </div>
       </header>
       {logoutError && (
         <p className="warning" role="alert">
           {logoutError}
         </p>
       )}
-      {authError && !PREVIEW_ONLY && (
+      {authError && (
         <aside className="warning" role="alert">
           <strong>Kết nối tài khoản chưa sẵn sàng</strong>
           <p>{authError}</p>
@@ -869,30 +862,32 @@ function App() {
           </button>
         </aside>
       )}
-      {PREVIEW_ONLY && (
-        <aside className="notice">
-          <strong>Bản xem thử · chưa kết nối Gmail/Sheets</strong>
-          <p>
-            Cut Label hoạt động trong trình duyệt. PDF không được tải lên máy
-            chủ. Chưa cần đăng nhập hoặc cài phần mềm.
-          </p>
-        </aside>
-      )}
       <nav className="tabs">
         <button
           className={page === "get" ? "active" : ""}
           onClick={() => navigatePage("get")}
+          aria-pressed={page === "get"}
         >
-          ✉ Get Label
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <rect x="3" y="5" width="18" height="14" rx="3" />
+            <path d="m4 7 6.7 5.1a2.2 2.2 0 0 0 2.6 0L20 7" />
+          </svg>
+          Get Label
         </button>
         <button
           className={page === "cut" ? "active" : ""}
           onClick={() => navigatePage("cut")}
+          aria-pressed={page === "cut"}
         >
-          ▣ Cut Label
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="6" cy="6" r="3" />
+            <circle cx="6" cy="18" r="3" />
+            <path d="m8.1 8.1 11.9 11.9M8.1 15.9 20 4" />
+          </svg>
+          Cut Label
         </button>
       </nav>
-      {page === "admin" && webMode && authenticated ? (
+      {page === "admin" ? (
         isAdmin ? (
           <React.Suspense
             fallback={
@@ -914,7 +909,7 @@ function App() {
             <button onClick={() => navigatePage("get")}>Về Get Label</button>
           </main>
         )
-      ) : page === "profile" && webMode && authenticated ? (
+      ) : page === "profile" ? (
         <UserProfile
           key={authUser.current}
           onEligibility={setPhoneReady}
@@ -932,213 +927,165 @@ function App() {
             </div>
             <span className="pill">Gmail → Google Sheets</span>
           </div>
-          {webMode && !authenticated ? (
-            <section className="configbox">
-              <h3>
-                {PREVIEW_ONLY
-                  ? "Gmail/Sheets sẽ được bổ sung sau"
-                  : "Đăng nhập hoặc tạo tài khoản"}
-              </h3>
+          {!phoneReady && (
+            <aside className="warning">
+              Cần kiểm tra thông tin điện thoại trước khi chạy Get Label.{" "}
+              <button
+                className="text-button"
+                onClick={() => navigatePage("profile")}
+              >
+                Mở Hồ sơ
+              </button>
+            </aside>
+          )}
+          <section className="configbox">
+            <h3>Google Sheets</h3>
+            <label className="field">
+              Spreadsheet ID
+              <input
+                value={sheetId}
+                onChange={(e) => {
+                  sheetDraft.current = e.target.value;
+                  setSheetId(e.target.value);
+                }}
+                placeholder=""
+                aria-describedby="sheet-id-help"
+              />
+            </label>
+            <details id="sheet-id-help" className="hint">
+              <summary>Cách lấy Spreadsheet ID</summary>
               <p>
-                {PREVIEW_ONLY
-                  ? "Bản xem thử chưa bật tài khoản Google. Chọn Cut Label để thử quét và xuất PDF ngay trong trình duyệt."
-                  : "Đăng nhập hoặc đăng ký bằng email và mật khẩu. Sau khi xác nhận email, bạn kết nối Gmail/Sheets riêng. Tài khoản Google cũ vẫn đăng nhập được bằng tùy chọn Google."}
+                Mở Google Sheets, sao chép phần nằm giữa /d/ và /edit trong
+                địa chỉ, rồi dán vào ô trên.
               </p>
-              <div className="inlineActions">
-                {!PREVIEW_ONLY && (
-                  <>
-                    <button onClick={() => openAuth("login")}>
-                      Mở trang đăng nhập
-                    </button>
-                    <button className="secondary" onClick={connectGoogle}>
-                      Đăng nhập bằng Google
-                    </button>
-                  </>
-                )}
-              </div>
-            </section>
-          ) : (
-            <>
-              {webMode && !phoneReady && (
-                <aside className="warning">
-                  Cần kiểm tra thông tin điện thoại trước khi chạy Get Label.{" "}
-                  <button
-                    className="text-button"
-                    onClick={() => navigatePage("profile")}
-                  >
-                    Mở Hồ sơ
-                  </button>
-                </aside>
-              )}
-              <section className="configbox">
-                <h3>Google Sheets</h3>
-                <label className="field">
-                  Spreadsheet ID
-                  <input
-                    value={sheetId}
-                    onChange={(e) => {
-                      sheetDraft.current = e.target.value;
-                      setSheetId(e.target.value);
-                    }}
-                    placeholder=""
-                    aria-describedby="sheet-id-help"
-                  />
-                </label>
-                <details id="sheet-id-help" className="hint">
-                  <summary>Cách lấy Spreadsheet ID</summary>
-                  <p>
-                    Mở Google Sheets, sao chép phần nằm giữa /d/ và /edit trong
-                    địa chỉ, rồi dán vào ô trên.
-                  </p>
-                </details>
-                <div className="inlineActions">
-                  <button className="secondary" onClick={saveConfig}>
-                    Lưu Sheet ID
-                  </button>
-                  <span className="muted">{configMsg}</span>
-                </div>
-              </section>
-              <section className="configbox">
-                <div className="linehead">
-                  <h3>Kết nối Gmail</h3>
-                  <span
-                    className={
-                      gmail.accounts?.length ? "pill green" : "pill warn"
-                    }
-                  >
-                    {gmail.accounts?.length || 0} token
-                  </span>
-                </div>
-                {!gmail.credentialsPresent && (
-                  <p className="warning">
-                    Thiếu credentials.json. Hãy đặt file OAuth credentials vào
-                    thư mục gốc theo README.
-                  </p>
-                )}
-                {gmail.accounts?.length ? (
-                  gmail.accounts.map((a) => (
-                    <div className="account" key={a.file}>
-                      <span className="dot" />
-                      <div className="accountInfo">
-                        <b>{a.email}</b>
-                        <small>
-                          {a.hasRefreshToken
-                            ? "Có refresh token — tự làm mới khi hết hạn"
-                            : "Không có refresh token — có thể cần kết nối lại"}
-                        </small>
-                      </div>
-                      <button
-                        className="danger small"
-                        onClick={() => deleteToken(a.file, a.email)}
-                      >
-                        Xóa token
-                      </button>
-                    </div>
-                  ))
-                ) : (
-                  <p className="muted">Chưa có token Gmail được kết nối.</p>
-                )}
-                <div className="inlineActions">
-                  <button onClick={connectGoogle}>
-                    Kết nối / làm mới Gmail
-                  </button>
-                  <button
-                    className="secondary"
-                    onClick={refresh}
-                    title="Đọc lại tài khoản Gmail đã kết nối, không cập nhật phiên bản phần mềm"
-                  >
-                    Cập nhật tài khoản Gmail
-                  </button>
-                </div>
-                <p className="hint">
-                  Token còn refresh token sẽ được tự làm mới và lưu lại. Nếu bị
-                  thu hồi, hãy kết nối Gmail lại.
-                </p>
-              </section>
-              <section className="configbox">
-                <h3>Thông tin chạy Get Label</h3>
-                <label className="field">
-                  Tên account Poshmark
-                  <input
-                    value={accountName}
-                    onChange={(e) => setAccountName(e.target.value)}
-                    placeholder="Nhập tên account:"
-                    autoComplete="off"
-                  />
-                </label>
-                <label className="field">
-                  Tên tab Google Sheets
-                  <input
-                    value={sheetName}
-                    onChange={(e) => changeSheetName(e.target.value)}
-                    placeholder="Ví dụ: Đơn Poshmark"
-                    autoComplete="off"
-                  />
-                </label>
-                <label className="field">
-                  Tài khoản Gmail
-                  <select
-                    value={tokenFile}
-                    onChange={(e) => setTokenFile(e.target.value)}
-                  >
-                    <option value="">-- Chọn Gmail --</option>
-                    {gmail.accounts?.map((account) => (
-                      <option key={account.file} value={account.file}>
-                        {account.email}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <p className="hint">
-                  Tên account Poshmark không được lưu. Tên tab sẽ được lưu trên
-                  máy và tự điền lần sau.
-                </p>
-              </section>
-              <aside className="notice" role="note">
-                <strong>Lưu ý: thao tác trên dữ liệu thật</strong>
-                <p>
-                  Get Label ghi vào Google Sheets và đánh dấu email đã xử lý là
-                  đã đọc. Kiểm tra đúng Gmail, Sheet và tên tab trước khi chạy.
-                </p>
-              </aside>
-              <section className="runbox">
-                <div>
-                  <h3>Chạy lấy đơn</h3>
-                  <p>
-                    Quét email chưa đọc, bỏ qua Order ID đã có trong Sheet, ghi
-                    dữ liệu vào tab “{sheetName || "đã chọn"}”.
-                  </p>
-                </div>
-                <button
-                  disabled={
-                    getBusy ||
-                    (webMode && !phoneReady) ||
-                    !sheetId ||
-                    !gmail.accounts?.length ||
-                    !accountName.trim() ||
-                    !sheetName.trim() ||
-                    !tokenFile
-                  }
-                  onClick={runGet}
-                >
-                  {getBusy ? "Đang chạy…" : "Chạy Get Label"}
-                </button>
-              </section>
-              {getOutput && (
-                <section className="logs">
-                  <div className="linehead">
-                    <h3>Kết quả / Log</h3>
-                    <button
-                      className="ghost small"
-                      onClick={() => setGetOutput("")}
-                    >
-                      Xóa log
-                    </button>
+            </details>
+            <div className="inlineActions">
+              <button className="secondary" onClick={saveConfig}>
+                Lưu Sheet ID
+              </button>
+              <span className="muted">{configMsg}</span>
+            </div>
+          </section>
+          <section className="configbox">
+            <div className="linehead">
+              <h3>Kết nối Gmail</h3>
+              <span
+                className={
+                  gmail.accounts?.length ? "pill green" : "pill warn"
+                }
+              >
+                {gmail.accounts?.length || 0} token
+              </span>
+            </div>
+            {gmail.accounts?.length ? (
+              gmail.accounts.map((a) => (
+                <div className="account" key={a.file}>
+                  <span className="dot" />
+                  <div className="accountInfo">
+                    <b>{a.email}</b>
                   </div>
-                  <pre>{getOutput}</pre>
-                </section>
-              )}
-            </>
+                  <button
+                    className="danger small"
+                    onClick={() => deleteToken(a.file, a.email)}
+                  >
+                    Xóa token
+                  </button>
+                </div>
+              ))
+            ) : (
+              <p className="muted">Chưa có token Gmail được kết nối.</p>
+            )}
+            <div className="inlineActions">
+              <button onClick={connectGoogle}>
+                Kết nối / làm mới Gmail
+              </button>
+              <button
+                className="secondary"
+                onClick={refresh}
+                title="Đọc lại tài khoản Gmail đã kết nối, không cập nhật phiên bản phần mềm"
+              >
+                Cập nhật tài khoản Gmail
+              </button>
+            </div>
+          </section>
+          <section className="configbox">
+            <h3>Thông tin chạy Get Label</h3>
+            <label className="field">
+              Tên account Poshmark
+              <input
+                value={accountName}
+                onChange={(e) => setAccountName(e.target.value)}
+                placeholder="Nhập tên account:"
+                autoComplete="off"
+              />
+            </label>
+            <label className="field">
+              Tên tab Google Sheets
+              <input
+                value={sheetName}
+                onChange={(e) => changeSheetName(e.target.value)}
+                placeholder="Ví dụ: Đơn Poshmark"
+                autoComplete="off"
+              />
+            </label>
+            <label className="field">
+              Tài khoản Gmail
+              <select
+                value={tokenFile}
+                onChange={(e) => setTokenFile(e.target.value)}
+              >
+                <option value="">-- Chọn Gmail --</option>
+                {gmail.accounts?.map((account) => (
+                  <option key={account.file} value={account.file}>
+                    {account.email}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </section>
+          <aside className="notice" role="note">
+            <strong>Lưu ý</strong>
+            <p>
+              Get Label ghi vào Google Sheets và đánh dấu email đã xử lý là
+              đã đọc. Kiểm tra đúng Gmail, Sheet và tên tab trước khi chạy.
+            </p>
+          </aside>
+          <section className="runbox">
+            <div>
+              <h3>Chạy lấy đơn</h3>
+              <p>
+                Quét email chưa đọc, bỏ qua Order ID đã có trong Sheet, ghi
+                dữ liệu vào tab “{sheetName || "đã chọn"}”.
+              </p>
+            </div>
+            <button
+              disabled={
+                getBusy ||
+                !phoneReady ||
+                !sheetId ||
+                !gmail.accounts?.length ||
+                !accountName.trim() ||
+                !sheetName.trim() ||
+                !tokenFile
+              }
+              onClick={runGet}
+            >
+              {getBusy ? "Đang chạy…" : "Chạy Get Label"}
+            </button>
+          </section>
+          {getOutput && (
+            <section className="logs">
+              <div className="linehead">
+                <h3>Kết quả / Log</h3>
+                <button
+                  className="ghost small"
+                  onClick={() => setGetOutput("")}
+                >
+                  Xóa log
+                </button>
+              </div>
+              <pre>{getOutput}</pre>
+            </section>
           )}
         </main>
       ) : (

@@ -1,7 +1,7 @@
 const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const { chromium } = require("playwright-core");
-const BASE = process.env.LABEL_TEST_URL || "http://127.0.0.1:3210";
+const BASE = process.env.LABEL_TEST_URL || "http://127.0.0.1:10000";
 let browser;
 before(async () => {
   browser = await chromium.launch({

@@ -6,7 +6,8 @@ const path = require("node:path");
 const { chromium } = require("playwright-core");
 const { PDFDocument, StandardFonts, degrees } = require("pdf-lib");
 const { unzipSync, strFromU8 } = require("fflate");
-const BASE = process.env.LABEL_TEST_URL || "http://127.0.0.1:5173";
+const BASE = process.env.LABEL_TEST_URL || "http://127.0.0.1:10000";
+const ORIGIN = new URL(BASE).origin;
 const ID = "abcdef0123456789abcdef01";
 const TRACKING = "9434650110837019925838";
 let browser, tmp;
@@ -79,25 +80,23 @@ async function open(t, options = {}) {
   });
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
-    if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
+    if (url.origin === ORIGIN) {
       if (url.pathname === "/api/session" && options.sessionFailure)
         return route.fulfill({
           status: 503,
           json: { error: "test unavailable" },
         });
-      if (url.pathname === "/api/session" && options.webMode)
+      if (url.pathname === "/api/session")
         return route.fulfill({
           json: {
             webMode: true,
             isAdmin: !!options.phoneProfile?.isAdmin,
-            authenticated: !!options.signedIn,
-            userId: options.signedIn ? "test-user" : null,
+            authenticated: options.signedIn !== false,
+            userId: options.signedIn !== false ? "test-user" : null,
             emailVerified:
-              !!options.signedIn && options.emailVerified !== false,
+              options.signedIn !== false && options.emailVerified !== false,
           },
         });
-      if (url.pathname === "/api/session" && !options.webMode)
-        return route.fulfill({ json: { webMode: false, authenticated: true } });
       if (url.pathname === "/api/auth/options")
         return route.fulfill({
           json: { passwordAuth: true, emailConfigured: true },
@@ -117,7 +116,7 @@ async function open(t, options = {}) {
         options.signedIn = false;
         return route.fulfill({ json: { ok: true } });
       }
-      if (url.pathname === "/api/profile" && options.webMode)
+      if (url.pathname === "/api/profile")
         return route.fulfill({
           json: options.phoneProfile || {
             phone: "",
@@ -178,7 +177,8 @@ async function open(t, options = {}) {
   await page.goto(BASE);
   if (
     !options.sessionFailure &&
-    (!options.webMode || (options.signedIn && options.emailVerified !== false))
+    options.signedIn !== false &&
+    options.emailVerified !== false
   )
     await page.getByRole("button", { name: /Cut Label/ }).click();
   return page;
@@ -578,7 +578,7 @@ test("refreshing Gmail does not overwrite an unsaved Sheet ID", async (t) => {
 });
 
 test("web root requires sign-in before either tool and has no guest bypass", async (t) => {
-  const page = await open(t, { webMode: true });
+  const page = await open(t, { signedIn: false });
   await page.getByRole("heading", { name: "Đăng nhập", exact: true }).waitFor();
   assert.equal(
     await page
@@ -610,8 +610,7 @@ test("version notice never reloads a page containing unexported labels", async (
 
 test("signed-in users can save a phone without claiming SMS or SIM verification", async (t) => {
   const page = await open(t, {
-    webMode: true,
-    signedIn: true,
+
     phoneProfile: {
       phone: "",
       version: 0,
@@ -653,8 +652,7 @@ test("phone admin can list, edit, review and cancel or confirm deletion", async 
     },
   ];
   const page = await open(t, {
-    webMode: true,
-    signedIn: true,
+
     phoneProfile: {
       phone: "",
       version: 0,
@@ -689,7 +687,7 @@ test("phone admin can list, edit, review and cancel or confirm deletion", async 
 });
 
 test("web login and registration open real forms while Google remains an alternative", async (t) => {
-  const page = await open(t, { webMode: true });
+  const page = await open(t, { signedIn: false });
   await page.getByRole("button", { name: "Đăng ký ngay", exact: true }).click();
   await page
     .getByRole("heading", { name: "Tạo tài khoản", exact: true })
@@ -713,7 +711,7 @@ test("web login and registration open real forms while Google remains an alterna
 });
 
 test("failed initial session lookup blocks tools and retry restores sign-in", async (t) => {
-  const options = { webMode: true, sessionFailure: true };
+  const options = { signedIn: false, sessionFailure: true };
   const page = await open(t, options);
   await page.getByRole("button", { name: "Thử lại kết nối" }).waitFor();
   assert.equal(
@@ -726,7 +724,7 @@ test("failed initial session lookup blocks tools and retry restores sign-in", as
 });
 
 test("auth forms show/hide passwords, validate confirmation and terms, and switch to recovery", async (t) => {
-  const page = await open(t, { webMode: true });
+  const page = await open(t, { signedIn: false });
   await page.route("**/api/auth/options", (r) =>
     r.fulfill({ json: { passwordAuth: true, emailConfigured: true } }),
   );
@@ -771,7 +769,7 @@ test("auth forms show/hide passwords, validate confirmation and terms, and switc
 });
 
 test("sign-in shows server failures and submits Remember me without logging passwords", async (t) => {
-  const page = await open(t, { webMode: true });
+  const page = await open(t, { signedIn: false });
   await page.getByRole("button", { name: "Đăng nhập", exact: true }).click();
   await page.getByLabel("Email", { exact: true }).fill("test@example.test");
   await page.getByLabel("Mật khẩu", { exact: true }).fill("test-password");
@@ -797,7 +795,7 @@ test("sign-in shows server failures and submits Remember me without logging pass
 });
 
 test("mobile auth page fits the viewport and resets password with a one-time fragment token", async (t) => {
-  const page = await open(t, { webMode: true });
+  const page = await open(t, { signedIn: false });
   await page.setViewportSize({ width: 375, height: 812 });
   await page.route("**/api/auth/reset-password", (r) =>
     r.fulfill({ json: { ok: true } }),
@@ -822,7 +820,7 @@ test("mobile auth page fits the viewport and resets password with a one-time fra
 });
 
 test("registration collects phone, returns to sign-in and keeps tools locked until email activation", async (t) => {
-  const options = { webMode: true };
+  const options = { signedIn: false };
   const page = await open(t, options);
   let registration;
   await page.route("**/api/auth/register", (route) => {
@@ -895,7 +893,7 @@ test("registration collects phone, returns to sign-in and keeps tools locked unt
 });
 
 test("verification links require sign-in and preserve the token through sign-in", async (t) => {
-  const options = { webMode: true };
+  const options = { signedIn: false };
   const page = await open(t, options);
   await page.evaluate(() => {
     window.location.hash = "/verify-email?token=guest-activation-token";
@@ -938,7 +936,7 @@ test("verification links require sign-in and preserve the token through sign-in"
 });
 
 test("logout protects unexported PDFs, reports failure and clears results after success", async (t) => {
-  const options = { webMode: true, signedIn: true };
+  const options = { signedIn: true };
   const page = await open(t, options);
   await upload(page, pdf(await fixture()), 1);
   let calls = 0,
@@ -973,8 +971,7 @@ test("logout protects unexported PDFs, reports failure and clears results after 
 
 test("account header opens the user's profile and keeps full phone numbers visible on desktop and mobile", async (t) => {
   const page = await open(t, {
-    webMode: true,
-    signedIn: true,
+
     account: { name: "Nguyễn Minh Anh", email: "minhanh@example.test" },
     phoneProfile: {
       phone: "+84901234567",
@@ -1040,8 +1037,7 @@ test("account header opens the user's profile and keeps full phone numbers visib
 
 test("a Google-claimed account can set a fresh password from its profile", async (t) => {
   const page = await open(t, {
-    webMode: true,
-    signedIn: true,
+
     account: { needsPasswordSetup: true },
   });
   await page.getByRole("button", { name: "Hồ sơ", exact: true }).click();

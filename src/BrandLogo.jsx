@@ -7,7 +7,7 @@ export default function BrandLogo() {
       src="/brand/logo-c.png"
       width="54"
       height="54"
-      alt="Logo Poshmark Label Manager"
+      alt="Logo Poshmark Label Tool"
       decoding="async"
       draggable={false}
     />

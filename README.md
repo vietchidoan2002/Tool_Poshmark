@@ -1,36 +1,23 @@
-# Poshmark Label Manager — React + JavaScript
+# Poshmark Label Tool — React + JavaScript
 
-One local app with two pages:
-- **Get Label**: preserves the existing `bot.js` email parsing and Google Sheets column mapping; allows editing the Sheet ID; runs the bot from the UI; persists refreshed OAuth tokens when Google emits them.
+One web app with two tools:
+- **Get Label**: preserves the existing `server/bot.cjs` email parsing and Google Sheets column mapping; allows editing the Sheet ID; runs the bot from the UI; persists refreshed OAuth tokens when Google emits them.
 - **Cut Label**: upload PDF labels, extract the Poshmark 24-character Order ID and USPS tracking, fall back to local Tesseract.js OCR, preview the label, choose a custom output filename, and export 4×6 inch PDFs. Batch export creates one ZIP with a tracking manifest.
 
-## Windows setup
-1. Install Node.js LTS from https://nodejs.org/.
-2. Extract this folder to a normal location.
-3. Create `config.json` from `config.example.json` (the app can do this on first launch) and enter the Google Sheets ID in the app UI.
-4. Copy your own Google OAuth `credentials.json` into this folder. **Do not share it.** It must have a redirect URI `http://localhost:3210/oauth2callback` registered in Google Cloud Console. Enable Gmail API and Google Sheets API.
-5. Double-click `Chạy Tool.bat`. The first run needs internet to install npm packages. OCR worker, core, and English language data are bundled locally by Vite.
-6. Open http://127.0.0.1:5173. In Get Label, click **Kết nối / làm mới Gmail**, sign in, grant Gmail modify and Sheets permissions, then return to the app.
-7. Confirm the Sheet ID, then click **Chạy Get Label**. On Cut Label, upload PDFs and check every ID before exporting.
+## Setup
 
-## OAuth and tokens
-- `credentials.json` contains your OAuth client secret. Keep it private.
-- `token_*.json` contains account access/refresh tokens. Keep these private too.
-- Existing `token_*.json` files from the old tool can be copied into the project root. If a refresh token exists, Google APIs can refresh expired access tokens; this app writes updated tokens back to the file.
-- If a refresh token is revoked/expired or Google requires consent again, use **Kết nối / làm mới Gmail**.
-- Do not upload `credentials.json`, `token_*.json`, or `config.json` to public repositories.
+Use Node.js 24 and run `npm ci`, `npm test`, and `npm run build`. Configure PostgreSQL and Google OAuth as described in [RENDER-SETUP.md](docs/RENDER-SETUP.md), then run `npm start` behind HTTPS. The Render blueprint is `render.yaml`.
+
+Sign in, verify your email and connect Gmail/Sheets from Get Label. The server encrypts the Google connection per user.
 
 ## Important behavior inherited from Get Label
-The original `bot.js` reads unread Gmail messages, parses Poshmark order blocks, skips Order IDs already present in column H of the `Đơn poshmark` tab, and writes fields into columns B, C, F, G, H, J, K, L, O, R, and W. It removes the UNREAD label after processing. Review the Google Sheet and test with a small number of unread emails first.
+The original `server/bot.cjs` reads unread Gmail messages, parses Poshmark order blocks, skips Order IDs already present in column H of the `Đơn poshmark` tab, and writes fields into columns B, C, F, G, H, J, K, L, O, R, and W. It removes the UNREAD label after processing. Review the Google Sheet and test with a small number of unread emails first.
 
 ## Limitations
 - OCR is not infallible. Check Order ID before printing/exporting. It tries to correct common OCR confusions but never trust a result blindly.
 - The cropper detects non-white page bounds and renders at 300 DPI (capped for oversized pages). It preserves aspect ratio inside a 4×6 inch page. Output is rasterized; test one label on your physical printer/scanner before bulk printing.
-- The app binds locally to 127.0.0.1 and is intended for one desktop user.
 
 ## Development and regression checks
-
-Use Node.js 24 (validated with 24.19.0) and npm. Run `npm ci`, `npm test`, and `npm run build`. Use `npm run dev` for the Vite frontend and Express API, or `npm start` after building to serve the built frontend and API together. These servers use loopback addresses as described above.
 
 Get Label processes at most 25 unread messages matching `"Order Number"` or `"Order Date"` per run. It spaces Google requests and retries transient/rate-limit responses up to three times, respecting `Retry-After` within its execution budget. If messages remain, run again. Unrelated or incompletely parsed messages stay unread. If processing fails after a write, logs preserve the written/skipped counts and the API reports failure; rows already written remain in Sheets. Rerunning skips IDs present in column H. Do not run simultaneous imports into the same sheet.
 
@@ -51,7 +38,7 @@ OCR has a 45-second time budget per page. It warns on unreliable/missing IDs, an
 
 ### Browser regression suite
 
-With Chromium installed (default `/usr/bin/chromium`, override with `CHROMIUM_PATH`), run `npm run dev` in another terminal, then `npm run test:browser`. To test a built instance, run `npm run build` and `npm start`, then use `LABEL_TEST_URL=http://127.0.0.1:3210 npm run test:browser`.
+With Chromium installed (default `/usr/bin/chromium`, override with `CHROMIUM_PATH`), run `npm run test:browser` against a running build. The default test URL is `http://127.0.0.1:10000`. Set `LABEL_TEST_URL` to use a different test deployment.
 
 The browser suite covers native/scanned labels, custom/default/missing/duplicate names, cancel/Escape, ZIP contents and manifest, valid PDFs surviving corrupt/encrypted neighbors, OCR asset failure, blank-page partial failure, page rotation, clear/re-import, busy controls, actual offline OCR and download/re-download. It verifies exported PDFs parse and have exactly one 4×6 inch page. It mocks the backend and never modifies Gmail or Sheets. The encrypted fixture uses fictional content and password `test-password`.
 
@@ -59,13 +46,9 @@ An optional private reference PDF can be tested using `LABEL_SAMPLE_PDF`, `LABEL
 
 The interface uses local system fonts (no font-CDN requests), highlights cautions in amber and errors in red, and provides a keyboard-accessible upload field. OCR progress identifies the file and page. An OCR render is reused to create the preview instead of rendering the page twice. Mobile layout, direct tracking display and one-recognition-per-page behavior are covered by regression tests. OCR accuracy remains dependent on the source image; always check the original label, especially visually similar hexadecimal characters.
 
-## Render preview and multi-user web mode
+## Deployment
 
-For the no-paid-services preview, follow [RENDER-PREVIEW.md](docs/RENDER-PREVIEW.md). The default render.yaml creates a static Cut Label preview only, built with VITE_PREVIEW_ONLY=true. It has no Gmail APIs, database or login.
-
-The separate `npm run start:web` entrypoint implements Google login, user-scoped encrypted credentials/Sheet IDs, origin checks and import locks with PostgreSQL. This is not the local `npm start` server. The full free-tier configuration (Render Free plus external Neon Free database) is in render.web.yaml and is not deployed by the default preview blueprint. See [RENDER-SETUP.md](docs/RENDER-SETUP.md). Live Google/Render/PostgreSQL verification is still required before a full multi-user launch; automated backend tests use fake Google, in-memory SQL and session storage. Never expose the old local-file API server publicly.
-
-For Gmail/Sheets without choosing paid infrastructure, follow [RENDER-SETUP.md](docs/RENDER-SETUP.md). The free web service is separate from the static Cut Label preview. Google OAuth secrets and the Neon direct database URL must be set securely in Render Environment; the static site cannot host those APIs. Free plans have quotas/sleep behavior, and live provider configuration must still be verified.
+The Render Free blueprint runs the web app on the `preview/ui-single-pass-ocr` branch and uses an external Neon PostgreSQL database. See [RENDER-SETUP.md](docs/RENDER-SETUP.md). Test live Gmail, Sheets and Neon on the deployed service before onboarding users.
 
 Phone management is available only in authenticated web mode. ADMIN_EMAILS selects administrators using verified account email addresses. Users can save only their own normalized phone; administrators can search, edit, delete and manually review phones. REQUIRE_REVIEWED_PHONE=true gates Get Label on manual review, not Cut Label. Formatting checks are not SMS verification or proof of SIM ownership. Review setup and schema notes in docs/RENDER-SETUP.md.
 
