@@ -517,7 +517,8 @@ function App() {
     setPendingDrive(null);
     setGmailLabels(current => ({ ...current, result }));
     setGetOutput(current => [current,
-      `Đã gắn link cột R cho ${result.linkedCount} tem đã khớp.`,
+      result.linkedCount ? `Đã gắn link cột R cho ${result.linkedCount} tem đã khớp.` : "",
+      result.skippedLinkedCount ? `Đã bỏ qua ${result.skippedLinkedCount} đơn có sẵn link ở cột R.` : "",
       ...result.warnings,
     ].filter(Boolean).join("\n"));
   }

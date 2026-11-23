@@ -592,25 +592,40 @@ async function createWebApp(config, deps = {}) {
         const auth = authorizeGmail(user, refreshWrites);
         requireDriveScope(auth);
         const request = deps.driveRequest || createGoogleRequest();
-        const drive = driveClient(auth);
         const sheets = deps.driveSheetsFactory?.(auth) || google.sheets({ version: "v4", auth });
         const rows = await sheetRows(sheets, plan, request);
         const warnings = [];
-        const linkedFiles = files.filter(({ orderId, tracking }) => {
-          if (rows.existing.has(orderId)) return true;
+        const alreadyLinked = new Set();
+        const needsLink = ({ orderId, tracking }, snapshot) => {
+          if (snapshot.linkedOrders.has(orderId)) {
+            alreadyLinked.add(orderId);
+            return false;
+          }
+          if (snapshot.existing.has(orderId)) return true;
           warnings.push(`Order ID ${orderId} · tracking ${tracking}: chưa tìm thấy đơn trong cột H để gắn link.`);
           return false;
-        });
-        if (!linkedFiles.length)
-          return res.json({ linkedCount: 0, warnings });
+        };
+        const pending = files.filter(file => needsLink(file, rows));
+        const links = new Map();
+        let csvUrl, folderUrl;
+        if (pending.length) {
+          const drive = driveClient(auth);
+          const folder = await checkDriveFolder(drive, plan.folder, request);
+          const saved = await saveDriveFiles({
+            drive, folder, files: pending, userId: user.id, request,
+          });
+          // Recheck column R after the uploads in case someone edited the sheet.
+          const currentRows = await sheetRows(sheets, plan, request);
+          for (const file of pending)
+            if (needsLink(file, currentRows))
+              links.set(file.orderId, saved.links.get(file.orderId));
+          await writeDriveLinks(sheets, plan, currentRows, links, request);
+          csvUrl = saved.csvUrl;
+          folderUrl = folder.webViewLink;
+        }
 
-        const folder = await checkDriveFolder(drive, plan.folder, request);
-        const { links, csvUrl } = await saveDriveFiles({
-          drive, folder, files: linkedFiles, userId: user.id, request,
-        });
-        await writeDriveLinks(sheets, plan, rows, links, request);
-
-        const readMessages = completedMessages(plan, req.body.completedBatches, linkedFiles);
+        const finished = files.filter(({ orderId }) => alreadyLinked.has(orderId) || links.has(orderId));
+        const readMessages = completedMessages(plan, req.body.completedBatches, finished);
         if (readMessages.length) {
           try {
             const gmail = deps.labelsGmailFactory?.(auth) || google.gmail({ version: "v1", auth });
@@ -623,7 +638,9 @@ async function createWebApp(config, deps = {}) {
         }
         if ((await Promise.all(refreshWrites)).includes(false))
           warnings.push("Chưa lưu được token Google mới. Có thể cần kết nối lại lần sau.");
-        return res.json({ linkedCount: links.size, csvUrl, folderUrl: folder.webViewLink, warnings });
+        return res.json({
+          linkedCount: links.size, skippedLinkedCount: alreadyLinked.size, csvUrl, folderUrl, warnings,
+        });
       } catch (error) {
         await Promise.allSettled(refreshWrites);
         return driveError(res, error, "Chưa hoàn tất lưu tem hoặc cập nhật cột R. Hãy thử lại để dùng lại các tệp đã lưu.");

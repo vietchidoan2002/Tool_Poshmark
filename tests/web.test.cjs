@@ -1933,15 +1933,23 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
   let nextFile = 1;
   let issue = false;
   const idsInSheet = [["ID Order"], [first], [first]];
+  const linksInSheet = [{}, { formattedValue: first, userEnteredValue: { stringValue: first } }];
+  let driveRequests = 0;
+  let linkDuringUpload;
   const drive = { files: {
     get: async ({ fileId }, options) => {
+      driveRequests++;
       assert.equal(fileId, folderId);
       assert.equal(options.headers["X-Goog-Drive-Resource-Keys"], folderId + "/resource-key");
       return { data: {
         mimeType: "application/vnd.google-apps.folder", capabilities: { canAddChildren: true },
       } };
     },
-    list: async () => ({ data: { files: [...saved.values()] } }),
+    list: async () => {
+      driveRequests++;
+      if (linkDuringUpload) linksInSheet[3] = linkDuringUpload;
+      return { data: { files: [...saved.values()] } };
+    },
     generateIds: async ({ count }) => ({ data: { ids: Array.from({ length: count }, () => "new-file-" + nextFile++) } }),
     create: async ({ requestBody, media }) => {
       assert.deepEqual(requestBody.parents, [folderId]);
@@ -1958,18 +1966,25 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
     },
   } };
   const sheetWrites = [];
-  const sheets = { spreadsheets: { values: {
+  const sheets = { spreadsheets: {
     get: async (args) => {
-      assert.equal(args.range, "'My ''Orders'''!H:H");
-      return { data: { values: idsInSheet } };
+      assert.deepEqual(args.ranges, ["'My ''Orders'''!H:H", "'My ''Orders'''!R:R"]);
+      assert.match(args.fields, /textFormatRuns/);
+      return { data: { sheets: [{ data: [
+        { startColumn: 7, rowData: idsInSheet.map(([id]) => ({ values: [{ formattedValue: id }] })) },
+        { startColumn: 17, rowData: linksInSheet.map(link => ({ values: [link] })) },
+      ] }] } };
     },
+    values: {
     batchUpdate: async ({ spreadsheetId, resource }) => {
       assert.equal(spreadsheetId, sheetId);
       writes.push("sheet");
       sheetWrites.push(resource.data);
       for (const { range, values } of resource.data) {
-        const row = range.match(/!H(\d+)$/)?.[1];
-        if (row) idsInSheet[Number(row) - 1] = values[0];
+        const row = range.match(/!R(\d+)$/)?.[1];
+        assert.ok(row, "only the R column should be updated");
+        const url = values[0][0];
+        linksInSheet[Number(row) - 1] = { formattedValue: url, userEnteredValue: { stringValue: url } };
       }
     },
   } } };
@@ -2041,25 +2056,50 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
     ["'My ''Orders'''!R3", saved.get("new-file-1").webViewLink],
   ]);
 
+  const manualLink = {
+    formattedValue: first,
+    userEnteredValue: { stringValue: first },
+    textFormatRuns: [{ format: { link: { uri: "https://drive.google.com/file/d/manual-label/view" } } }],
+  };
+  linksInSheet[1] = manualLink;
+  linksInSheet[2] = {};
   issue = false;
   const prepared = await (await prepare()).json();
   const complete = await finish(prepared.token, files, { completedBatches: [0] });
   assert.equal(complete.status, 200);
   const payload = await complete.json();
-  assert.equal(payload.linkedCount, 2);
+  assert.equal(payload.linkedCount, 1);
+  assert.equal(payload.skippedLinkedCount, 1);
   assert.deepEqual(writes.slice(5), ["orders", "drive:application/pdf", "drive:text/csv", "sheet", "gmail"]);
   assert.deepEqual([...saved.values()].map(f => f.mimeType), ["application/pdf", "text/csv", "application/pdf", "text/csv"]);
   assert.equal(saved.get("new-file-1").name, first + ".pdf");
   const csv = saved.get("new-file-4");
-  assert.match(csv.bytes.toString("utf8"), /"bundle.pdf","2","abcdef0123456789abcdef01"/);
+  assert.ok(!csv.bytes.toString("utf8").includes(first), "CSV lists the newly linked label");
   assert.ok(csv.bytes.toString("utf8").includes(saved.get("new-file-3").webViewLink));
   assert.equal(payload.csvUrl, csv.webViewLink);
   assert.deepEqual(sheetWrites[1].map(row => [row.range, row.values[0][0]]), [
-    ["'My ''Orders'''!R2", saved.get("new-file-1").webViewLink],
-    ["'My ''Orders'''!R3", saved.get("new-file-1").webViewLink],
     ["'My ''Orders'''!R4", saved.get("new-file-3").webViewLink],
   ]);
-  assert.equal((await finish(prepared.token, files)).status, 200);
+  assert.deepEqual(linksInSheet[1], manualLink);
+  assert.deepEqual(linksInSheet[2], {});
+  const requestsBeforeRetry = driveRequests;
+  const writesBeforeRetry = sheetWrites.length;
+  const retry = await finish(prepared.token, files);
+  assert.equal(retry.status, 200);
+  assert.deepEqual(await retry.json(), { linkedCount: 0, skippedLinkedCount: 2, warnings: [] });
+  assert.equal(driveRequests, requestsBeforeRetry);
+  assert.equal(sheetWrites.length, writesBeforeRetry);
+
+  linksInSheet[3] = {};
+  linkDuringUpload = {
+    formattedValue: "Tem đơn thứ hai",
+    userEnteredValue: { formulaValue: '=HYPERLINK("https://drive.google.com/file/d/another-label/view","Tem đơn thứ hai")' },
+  };
+  const duringUpload = await finish(prepared.token, files);
+  assert.equal(duringUpload.status, 200);
+  assert.equal((await duringUpload.json()).skippedLinkedCount, 2);
+  assert.deepEqual(linksInSheet[3], linkDuringUpload);
+  assert.equal(sheetWrites.length, writesBeforeRetry);
   assert.equal(saved.size, 4);
   assert.equal(idsInSheet.length, 4);
 });

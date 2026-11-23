@@ -200,26 +200,54 @@ async function saveDriveFiles({ drive, folder, files, userId, request }) {
   return { links: new Map(saved.map(f => [f.orderId, f.url])), csvUrl: csv.url };
 }
 
+function hasFileLink(cell) {
+  if (!cell) return false;
+  return Boolean(
+    cell.hyperlink ||
+    cell.userEnteredFormat?.textFormat?.link?.uri ||
+    cell.textFormatRuns?.some(run => run.format?.link?.uri) ||
+    /\bHYPERLINK\s*\(/i.test(cell.userEnteredValue?.formulaValue || "") ||
+    /^(?:https?:\/\/|(?:drive|docs)\.google\.com\/)/i.test(
+      (cell.userEnteredValue?.stringValue ?? cell.formattedValue ?? "").trim(),
+    )
+  );
+}
+
 async function sheetRows(sheets, plan, request) {
   const sheet = `'${plan.sheetName.replace(/'/g, "''")}'!`;
-  const { data } = await request(options => sheets.spreadsheets.values.get({
-    spreadsheetId: plan.sheetId, range: sheet + "H:H",
+  const cellFields = [
+    "formattedValue", "userEnteredValue", "hyperlink",
+    "userEnteredFormat(textFormat(link))", "textFormatRuns(format(link))",
+  ].join(",");
+  const { data } = await request(options => sheets.spreadsheets.get({
+    spreadsheetId: plan.sheetId,
+    ranges: [sheet + "H:H", sheet + "R:R"],
+    fields: `sheets(data(startRow,startColumn,rowData(values(${cellFields}))))`,
   }, options));
+  const grids = data.sheets?.[0]?.data || [];
+  const orderGrid = grids.find(grid => grid.startColumn === 7);
+  const linkGrid = grids.find(grid => grid.startColumn === 17);
   const existing = new Map();
-  for (const [index, row] of (data.values || []).entries()) {
-    const id = String(row[0] || "").trim().toLowerCase();
+  const linkedOrders = new Set();
+  for (const [index, row] of (orderGrid?.rowData || []).entries()) {
+    const id = row.values?.[0]?.formattedValue?.trim().toLowerCase();
     if (!id || id === "id order") continue;
+    const rowIndex = (orderGrid.startRow || 0) + index;
+    const linkCell = linkGrid?.rowData?.[rowIndex - (linkGrid.startRow || 0)]?.values?.[0];
     if (!existing.has(id)) existing.set(id, []);
-    existing.get(id).push(index + 1);
+    existing.get(id).push(rowIndex + 1);
+    if (hasFileLink(linkCell)) linkedOrders.add(id);
   }
-  return { sheet, existing };
+  return { sheet, existing, linkedOrders };
 }
 
 async function writeDriveLinks(sheets, plan, rows, links, request) {
   const data = [];
-  for (const [orderId, url] of links)
+  for (const [orderId, url] of links) {
+    if (rows.linkedOrders.has(orderId)) continue;
     for (const row of rows.existing.get(orderId) || [])
       data.push({ range: `${rows.sheet}R${row}`, values: [[url]] });
+  }
   if (data.length) await request(options => sheets.spreadsheets.values.batchUpdate({
     spreadsheetId: plan.sheetId,
     resource: { valueInputOption: "USER_ENTERED", data },
