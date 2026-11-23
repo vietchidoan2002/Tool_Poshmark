@@ -23,7 +23,7 @@ test("downloads a bundled attachment and retains tracking for orders already in 
   let sheetWrite = 0;
   const gmail = { users: { messages: {
     list: async () => ({ data: { messages: [{ id: "message-1" }] } }),
-    get: async () => ({ data: { payload: { mimeType: "multipart/mixed", parts: [
+    get: async () => ({ data: { labelIds: ["UNREAD"], payload: { mimeType: "multipart/mixed", parts: [
       { mimeType: "text/html", body: { data: Buffer.from(
         `<div>Order Number</div><div>${first}</div><div>Tracking Number</div><div>${trackingA}</div><div>Order Number</div><div>${second}</div><div>Tracking Number</div><div>${trackingB}</div>`,
       ).toString("base64url") } },
@@ -75,7 +75,7 @@ test("collecting labels keeps ordinary order writes even when emails have no usa
       const text = id === "mail-with-tem"
         ? `Order Number ${first}\nTracking Number: ${trackingA}\nOrder Number means your order reference`
         : id === "mail-without-tem" ? `Order Number ${second}` : "Newsletter";
-      return { data: { payload: { mimeType: "multipart/mixed", parts: [
+      return { data: { labelIds: ["UNREAD"], payload: { mimeType: "multipart/mixed", parts: [
         { mimeType: "text/plain", body: { data: Buffer.from(text).toString("base64url") } },
         ...(id === "mail-with-tem"
           ? [{ mimeType: "application/pdf", filename: "label.pdf", body: { data: pdf.toString("base64url") } }]
@@ -111,4 +111,55 @@ test("a cross-email tracking conflict does not block unrelated matched labels", 
   assert.deepEqual(planOrders(batches), [{ orderId: third, tracking: trackingB }]);
   assert.match(batches[0].issues[0], /trùng giữa các Order ID/);
   assert.ok(batches[1].issues[0].includes(second));
+});
+
+test("Get Label enforces the Gmail unread filter before processing a mixed thread", async () => {
+  const third = "abcdef0123456789abcdef03";
+  const read = [];
+  const attachments = [];
+  const written = [];
+  const messages = {
+    "already-read": { labelIds: ["INBOX"], orderId: first },
+    "still-unread": { labelIds: ["INBOX", "UNREAD"], orderId: second },
+    "no-labels": { orderId: third },
+  };
+  const gmail = { users: { messages: {
+    list: async ({ labelIds, q }) => {
+      assert.deepEqual(labelIds, ["UNREAD"]);
+      assert.match(q, /Order Number/);
+      // Simulate labels changing after the unread list was generated.
+      return { data: { messages: Object.keys(messages).map(id => ({ id, threadId: "same-thread" })) } };
+    },
+    get: async ({ id, format }) => {
+      assert.equal(format, "full");
+      const { labelIds, orderId } = messages[id];
+      return { data: { labelIds, payload: { mimeType: "multipart/mixed", parts: [
+        { mimeType: "text/plain", body: { data: Buffer.from(
+          `Order Number ${orderId}\nTracking Number: ${trackingA}`
+        ).toString("base64url") } },
+        { mimeType: "application/pdf", filename: "label.pdf", body: { attachmentId: id } },
+      ] } } };
+    },
+    attachments: { get: async ({ messageId }) => {
+      attachments.push(messageId);
+      return { data: { data: Buffer.from("%PDF-1.4\nfixture").toString("base64url") } };
+    } },
+    modify: async ({ id }) => { read.push(id); },
+  } } };
+  const sheets = { spreadsheets: { values: {
+    get: async () => ({ data: { values: [["ID Order"]] } }),
+    batchUpdate: async ({ resource }) => {
+      written.push(...resource.data.filter(cell => /!H\d+$/.test(cell.range)).map(cell => cell.values[0][0]));
+    },
+  } } };
+  const logs = [];
+  const stats = await processOrders(null, "Shop", "Orders", {
+    gmail, sheets, includeLabels: true, request: fn => fn({}), log: (_level, line) => logs.push(line),
+  });
+  assert.equal(stats.writtenOrderCount, 1);
+  assert.deepEqual(written, [second]);
+  assert.deepEqual(attachments, ["still-unread"]);
+  assert.deepEqual(read, []);
+  assert.deepEqual(stats.labelBatches.map(({ messageId }) => messageId), ["still-unread"]);
+  assert.ok(logs.some(line => line.includes("bỏ qua 2 email không còn nhãn chưa đọc")));
 });

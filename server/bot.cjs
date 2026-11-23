@@ -73,9 +73,11 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
         }
 
         const query = labelBatches
-            ? 'is:unread {"Order Number" "Order Date" subject:"Your shipping labels are inside"}'
-            : 'is:unread {"Order Number" "Order Date"}';
-        const res = await request(requestOptions => gmail.users.messages.list({ userId: 'me', q: query, maxResults: 25 }, requestOptions));
+            ? '{"Order Number" "Order Date" subject:"Your shipping labels are inside"}'
+            : '{"Order Number" "Order Date"}';
+        const res = await request(requestOptions => gmail.users.messages.list({
+            userId: 'me', labelIds: ['UNREAD'], q: query, maxResults: 25,
+        }, requestOptions));
         const messages = res.data.messages;
         
         if (!messages || messages.length === 0) {
@@ -84,11 +86,19 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
         }
 
         log("INFO", `Tìm thấy ${messages.length} email chưa đọc.`);
+        let noLongerUnread = 0;
 
         for (const msg of messages) {
             const msgId = msg.id;
-            const messageData = await request(requestOptions => gmail.users.messages.get({ userId: 'me', id: msgId }, requestOptions));
-            const payload = messageData.data.payload;
+            const { data } = await request(requestOptions => gmail.users.messages.get({
+                userId: 'me', id: msgId, format: 'full',
+            }, requestOptions));
+            // Gmail labels can change after messages.list returns.
+            if (!Array.isArray(data.labelIds) || !data.labelIds.includes('UNREAD')) {
+                noLongerUnread++;
+                continue;
+            }
+            const payload = data.payload;
             const attachments = labelBatches ? pdfParts(payload) : [];
             const labelOrders = [];
 
@@ -287,6 +297,8 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                 resource: { removeLabelIds: ['UNREAD'] }
             }, requestOptions));
         }
+        if (noLongerUnread)
+            log('INFO', `Đã bỏ qua ${noLongerUnread} email không còn nhãn chưa đọc.`);
         if (res.data.nextPageToken) log('INFO', 'Còn email chưa xử lý. Chạy lại để tiếp tục (tối đa 25 email mỗi lần).');
         log("OK", `Hoàn tất account ${manualAccountName} | Đã ghi: ${writtenCount} | Bỏ qua: ${skippedCount}`);
         return stats();

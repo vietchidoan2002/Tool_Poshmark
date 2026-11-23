@@ -34,8 +34,8 @@ function clients({ failModify = false, unrelated = false, duplicate = false, mul
     let writes = 0, modifies = 0;
     const id = 'abcdef0123456789abcdef01';
     const gmail = { users: { messages: {
-        list: async args => { assert.equal(args.maxResults, 25); return { data: { messages: [{ id: 'test' }] } }; },
-        get: async () => ({ data: { payload: { headers: [], mimeType: 'text/plain', body: { data: Buffer.from(unrelated ? 'Newsletter' : `Order Number ${id} Size: M Buyer: @sample${multi ? " Size: L Buyer: @sample" : ""}`).toString('base64') } } } }),
+        list: async args => { assert.equal(args.maxResults, 25); assert.deepEqual(args.labelIds, ['UNREAD']); return { data: { messages: [{ id: 'test' }] } }; },
+        get: async () => ({ data: { labelIds: ['UNREAD'], payload: { headers: [], mimeType: 'text/plain', body: { data: Buffer.from(unrelated ? 'Newsletter' : `Order Number ${id} Size: M Buyer: @sample${multi ? " Size: L Buyer: @sample" : ""}`).toString('base64') } } } }),
         modify: async () => { modifies++; if (failModify) throw new Error('quota exhausted'); return {}; }
     } } };
     const sheets = { spreadsheets: { values: {
