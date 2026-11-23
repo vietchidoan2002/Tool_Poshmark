@@ -2,7 +2,9 @@ const { google } = require('googleapis');
 const cheerio = require('cheerio');
 const { createGoogleRequest } = require('./google-request.cjs');
 const { MAX_PDF_BYTES, pdfParts, trackingInOrder, coversLabelReferences, loadLabelBatch } = require('./gmail-labels.cjs');
-const { sheetRows } = require('./drive-label-import.cjs');
+const { planOrders, sheetRows } = require('./drive-label-import.cjs');
+
+const TRACKING_COLUMN_NUMBER = 30; // AD
 
 function logLine(level, message) {
     const time = new Date().toLocaleTimeString('vi-VN', { hour12: false });
@@ -19,9 +21,29 @@ function formatMockupUrl(url) {
     } catch (e) { return url; }
 }
 
+async function ensureTrackingColumn(sheets, spreadsheetId, sheet, request) {
+    await request(async options => {
+        const { data } = await sheets.spreadsheets.get({
+            spreadsheetId, ranges: [`${sheet}A1`],
+            fields: 'sheets(properties(sheetId,gridProperties(columnCount)))',
+        }, options);
+        const properties = data.sheets?.[0]?.properties;
+        const columnCount = properties?.gridProperties?.columnCount;
+        if (!columnCount) throw Error('Không xác định được cột AD trong tab Google Sheets.');
+        if (columnCount >= TRACKING_COLUMN_NUMBER) return;
+        await sheets.spreadsheets.batchUpdate({
+            spreadsheetId,
+            resource: { requests: [{ appendDimension: {
+                sheetId: properties.sheetId, dimension: 'COLUMNS', length: TRACKING_COLUMN_NUMBER - columnCount,
+            } }] },
+        }, options);
+    });
+}
+
 async function processOrders(auth, manualAccountName, sheetName, options = {}) {
     const log = options.log || logLine;
     const { spreadsheetId } = options;
+    const sheet = `'${sheetName.replace(/'/g, "''")}'!`;
     let writtenCount = 0;
     let writtenOrderCount = 0;
     let skippedCount = 0;
@@ -45,26 +67,28 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
         // TÍNH NĂNG MỚI: QUÉT SHEET TÌM DÒNG TRỐNG & LƯU LẠI CÁC ID ĐÃ CÓ
         // ==========================================
         let targetRow = 2;
-        const existingOrderIds = new Set();
+        let orderRows = new Map();
         let linkedOrders = new Set();
+        let trackingColumnReady = false;
 
         try {
             if (labelBatches && options.resolveLinkedEmails) {
                 const rows = await sheetRows(sheets, { sheetId: spreadsheetId, sheetName }, request);
                 linkedOrders = rows.linkedOrders;
-                for (const [orderId, rowNumbers] of rows.existing) {
-                    existingOrderIds.add(orderId);
+                orderRows = rows.existing;
+                for (const rowNumbers of orderRows.values()) {
                     targetRow = Math.max(targetRow, rowNumbers.at(-1) + 1);
                 }
             } else {
                 const response = await request(requestOptions => sheets.spreadsheets.values.get({
                     spreadsheetId,
-                    range: `'${sheetName.replace(/'/g, "''")}'!H:H`,
+                    range: `${sheet}H:H`,
                 }, requestOptions));
                 for (const [index, row] of (response.data.values || []).entries()) {
                     const value = String(row?.[0] || "").trim().toLowerCase();
                     if (!value || value === "id order") continue;
-                    existingOrderIds.add(value);
+                    if (!orderRows.has(value)) orderRows.set(value, []);
+                    orderRows.get(value).push(index + 1);
                     targetRow = Math.max(targetRow, index + 2);
                 }
             }
@@ -101,7 +125,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
             }
             const payload = data.payload;
             const attachments = labelBatches ? pdfParts(payload) : [];
-            const labelOrders = [];
+            const emailOrders = [];
 
             const subjectHeader = (payload.headers || []).find(h => h.name.toLowerCase() === 'subject');
             const subjectTitle = subjectHeader ? subjectHeader.value : "Không rõ tiêu đề";
@@ -194,13 +218,12 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                     }
 
                     hasOrder = true;
-                    if (attachments.length)
-                        labelOrders.push({ orderId, tracking: trackingInOrder(block) });
+                    emailOrders.push({ orderId, tracking: trackingInOrder(block) });
 
                     // ==========================================
                     // KHIÊN CHỐNG TRÙNG LẶP ĐƠN HÀNG
                     // ==========================================
-                    if (existingOrderIds.has(orderId)) {
+                    if (orderRows.has(orderId)) {
                         skippedCount++;
                         log("SKIP", `Đơn ID ${orderId} đã có trong Sheet.`);
                         // Vẫn tăng biến đếm ảnh để các đơn chưa có bên dưới không bị lấy nhầm ảnh của đơn đã bỏ qua
@@ -260,25 +283,27 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                         items.push({ size: '', buyer: defaultBuyer });
                     }
 
-                    let dataToWrite = [];
+                    const dataToWrite = [];
+                    const rowNumbers = [];
                     for (let k = 0; k < items.length; k++) {
                         const item = items[k];
                         const currentMockup = formatMockupUrl(allImages[currentImgIndex] || ""); 
                         currentImgIndex++;
 
-                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!B${targetRow}`, values: [[orderMonth]] });
-                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!C${targetRow}`, values: [[orderDateFmt]] });
-                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!F${targetRow}`, values: [[manualAccountName]] });
-                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!G${targetRow}`, values: [[item.buyer]] });
-                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!H${targetRow}`, values: [[orderId]] });
-                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!J${targetRow}`, values: [["1"]] });
-                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!K${targetRow}`, values: [["T-shirt"]] });
-                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!L${targetRow}`, values: [[item.size]] });
-                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!O${targetRow}`, values: [[earnings]] });
-                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!R${targetRow}`, values: [[orderId]] });
-                        dataToWrite.push({ range: `'${sheetName.replace(/'/g, "''")}'!W${targetRow}`, values: [[currentMockup]] });
+                        dataToWrite.push({ range: `${sheet}B${targetRow}`, values: [[orderMonth]] });
+                        dataToWrite.push({ range: `${sheet}C${targetRow}`, values: [[orderDateFmt]] });
+                        dataToWrite.push({ range: `${sheet}F${targetRow}`, values: [[manualAccountName]] });
+                        dataToWrite.push({ range: `${sheet}G${targetRow}`, values: [[item.buyer]] });
+                        dataToWrite.push({ range: `${sheet}H${targetRow}`, values: [[orderId]] });
+                        dataToWrite.push({ range: `${sheet}J${targetRow}`, values: [["1"]] });
+                        dataToWrite.push({ range: `${sheet}K${targetRow}`, values: [["T-shirt"]] });
+                        dataToWrite.push({ range: `${sheet}L${targetRow}`, values: [[item.size]] });
+                        dataToWrite.push({ range: `${sheet}O${targetRow}`, values: [[earnings]] });
+                        dataToWrite.push({ range: `${sheet}R${targetRow}`, values: [[orderId]] });
+                        dataToWrite.push({ range: `${sheet}W${targetRow}`, values: [[currentMockup]] });
 
                         log("ORDER", `Đang ghi đơn ${orderId} | Buyer: ${item.buyer || "N/A"} | Size: ${item.size || "N/A"}`);
+                        rowNumbers.push(targetRow);
                         targetRow++;
                     }
 
@@ -287,26 +312,49 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                             spreadsheetId,
                             resource: { valueInputOption: 'USER_ENTERED', data: dataToWrite }
                         }, requestOptions));
-                        writtenCount += dataToWrite.length / 11;
+                        writtenCount += rowNumbers.length;
                         writtenOrderCount++;
-                        existingOrderIds.add(orderId);
+                        orderRows.set(orderId, rowNumbers);
                         log("OK", `Đã ghi đơn ${orderId} vào Sheet.`);
                     }
                 }
             }
 
+            const trackingBatch = { orders: emailOrders, issues: [] };
+            const trackingCells = planOrders([trackingBatch]).flatMap(({ orderId, tracking }) =>
+                orderRows.get(orderId).map(row => ({ range: `${sheet}AD${row}`, values: [[tracking]] })));
+            for (const issue of trackingBatch.issues) log('WARN', issue);
+            if (trackingCells.length) {
+                if (!trackingColumnReady) {
+                    await ensureTrackingColumn(sheets, spreadsheetId, sheet, request);
+                    trackingColumnReady = true;
+                }
+                const { data } = await request(options => sheets.spreadsheets.values.batchGet({
+                    spreadsheetId, ranges: trackingCells.map(cell => cell.range), valueRenderOption: 'FORMULA',
+                }, options));
+                const missingTracking = trackingCells.filter((_, i) =>
+                    (data.valueRanges[i]?.values?.[0]?.[0] ?? '') === '');
+                if (missingTracking.length) {
+                    // RAW keeps all digits of long USPS tracking numbers intact.
+                    await request(options => sheets.spreadsheets.values.batchUpdate({
+                        spreadsheetId, resource: { valueInputOption: 'RAW', data: missingTracking },
+                    }, options));
+                    log('OK', `Đã ghi USPS tracking vào ${missingTracking.length} ô ở cột AD.`);
+                }
+            }
+
             const canMarkRead = hasOrder && !hasIncompleteOrder;
             const completeLabelReferences = attachments.length && !hasMalformedId &&
-                coversLabelReferences(plainText, labelOrders);
+                coversLabelReferences(plainText, emailOrders);
             const alreadyLinked = completeLabelReferences &&
-                attachments.length <= new Set(labelOrders.map(order => order.orderId)).size &&
-                labelOrders.every(order => linkedOrders.has(order.orderId));
+                attachments.length <= new Set(emailOrders.map(order => order.orderId)).size &&
+                emailOrders.every(order => linkedOrders.has(order.orderId));
 
             if (hasIncompleteOrder && !completeLabelReferences)
                 log("INFO", "Email có mục đơn thiếu Order ID hợp lệ. Cần đối chiếu trước khi đánh dấu đã đọc.");
             if (attachments.length && !alreadyLinked) {
                 labelBatches.push(await loadLabelBatch({
-                    gmail, request, messageId: msgId, parts: attachments, orders: labelOrders,
+                    gmail, request, messageId: msgId, parts: attachments, orders: emailOrders,
                     budget: labelBudget, canMarkRead: canMarkRead || completeLabelReferences,
                 }));
             } else if (canMarkRead || alreadyLinked) {

@@ -9,6 +9,20 @@ const second = "abcdef0123456789abcdef02";
 const trackingA = "9400000000000000000001";
 const trackingB = "9400000000000000000002";
 
+function trackingGrid({ columnCount = 30, cells = {}, expanded = [] } = {}) {
+  return {
+    get: async ({ ranges }) => {
+      assert.deepEqual(ranges, ["'Orders'!A1"]);
+      return { data: { sheets: [{ properties: { sheetId: 123, gridProperties: { columnCount } } }] } };
+    },
+    batchUpdate: async ({ resource }) => { expanded.push(...resource.requests); },
+    batchGet: async ({ ranges, valueRenderOption }) => {
+      assert.equal(valueRenderOption, "FORMULA");
+      return { data: { valueRanges: ranges.map(range => ({ values: [[cells[range] ?? ""]] })) } };
+    },
+  };
+}
+
 test("reads a labeled USPS tracking only when its value is unique", () => {
   assert.equal(trackingInOrder(`Tracking Number\n> ${trackingA}\nBuyer`), trackingA);
   assert.equal(trackingInOrder(`Tracking Number: ${trackingA}\nTracking Number: ${trackingB}`), "");
@@ -17,15 +31,16 @@ test("reads a labeled USPS tracking only when its value is unique", () => {
   assert.deepEqual(barcodeTrackings(`garbage${trackingA}`), []);
 });
 
-test("downloads a bundled attachment and retains tracking for orders already in Sheets", async () => {
+test("writes exact USPS tracking for existing orders and every new item row in a bundled email", async () => {
   const attachment = Buffer.from("%PDF-1.4\nfixture");
   const notices = [];
-  let sheetWrite = 0;
+  const sheetWrites = [];
+  const expanded = [];
   const gmail = { users: { messages: {
     list: async () => ({ data: { messages: [{ id: "message-1" }] } }),
     get: async () => ({ data: { labelIds: ["UNREAD"], payload: { mimeType: "multipart/mixed", parts: [
       { mimeType: "text/html", body: { data: Buffer.from(
-        `<div>Order Number</div><div>${first}</div><div>Tracking Number</div><div>${trackingA}</div><div>Order Number</div><div>${second}</div><div>Tracking Number</div><div>${trackingB}</div>`,
+        `<div>Order Number</div><div>${first}</div><div>Tracking Number</div><div>${trackingA}</div><div>Order Number</div><div>${second}</div><div>Tracking Number</div><div>${trackingB}</div><div>Size: M</div><div>Size: L</div>`,
       ).toString("base64url") } },
       { mimeType: "application/pdf", filename: "tem.pdf", body: { attachmentId: "attachment-1", size: attachment.length } },
     ] } } }),
@@ -35,14 +50,23 @@ test("downloads a bundled attachment and retains tracking for orders already in 
     } },
     modify: async () => assert.fail("attachment email must stay unread until confirmation"),
   } } };
-  const sheets = { spreadsheets: { values: {
-    get: async () => ({ data: { values: [["id order"], [first]] } }),
-    batchUpdate: async () => { sheetWrite++; },
+  const grid = trackingGrid({ columnCount: 26, cells: { "'Orders'!AD3": '=IF(FALSE,"keep","")' }, expanded });
+  const sheets = { spreadsheets: { get: grid.get, batchUpdate: grid.batchUpdate, values: {
+    get: async () => ({ data: { values: [["id order"], [first], [first.toUpperCase()]] } }),
+    batchGet: grid.batchGet,
+    batchUpdate: async ({ resource }) => { sheetWrites.push(resource); },
   } } };
   const result = await processOrders(null, "Store", "Orders", {
     gmail, sheets, spreadsheetId: "sheet", includeLabels: true, request: fn => fn({}), log: () => {},
   });
-  assert.equal(sheetWrite, 1);
+  assert.deepEqual(expanded, [{ appendDimension: { sheetId: 123, dimension: "COLUMNS", length: 4 } }]);
+  assert.equal(result.writtenCount, 2);
+  assert.equal(sheetWrites.length, 2);
+  assert.deepEqual(sheetWrites[1], { valueInputOption: "RAW", data: [
+    { range: "'Orders'!AD2", values: [[trackingA]] },
+    { range: "'Orders'!AD4", values: [[trackingB]] },
+    { range: "'Orders'!AD5", values: [[trackingB]] },
+  ] });
   assert.equal(result.skippedCount, 1);
   assert.deepEqual(notices, [{ userId: "me", messageId: "message-1", id: "attachment-1" }]);
   assert.deepEqual(result.labelBatches, [{
@@ -61,6 +85,39 @@ test("Gmail confirmation is bound to the account, Gmail connection and expiratio
   assert.equal(confirmedMessageId(secret, { ...user, token_version: 5 }, token, 2000), null);
   assert.equal(confirmedMessageId(secret, user, token.replace("message-1", "message-2"), 2000), null);
   assert.equal(confirmedMessageId(secret, user, token, 3601000), null);
+});
+
+test("retries a failed tracking write before marking an order email read", async () => {
+  const grid = trackingGrid();
+  const orderRows = [["ID Order"]];
+  const events = [];
+  const gmail = { users: { messages: {
+    list: async () => ({ data: { messages: [{ id: "message-1" }] } }),
+    get: async () => ({ data: { labelIds: ["UNREAD"], payload: { mimeType: "text/plain", body: {
+      data: Buffer.from(`Order Number ${first}\nTracking Number: ${trackingA}`).toString("base64url"),
+    } } } }),
+    modify: async () => { events.push("read"); },
+  } } };
+  const sheets = { spreadsheets: { get: grid.get, values: {
+    get: async () => ({ data: { values: orderRows } }),
+    batchGet: grid.batchGet,
+    batchUpdate: async ({ resource }) => {
+      if (resource.valueInputOption === "USER_ENTERED") {
+        orderRows.push([first]);
+        events.push("order");
+      } else {
+        assert.deepEqual(resource.data, [{ range: "'Orders'!AD2", values: [[trackingA]] }]);
+        events.push("tracking");
+        if (events.length === 2) throw Error("failed to write AD");
+      }
+    },
+  } } };
+  const options = { gmail, sheets, spreadsheetId: "sheet", request: fn => fn({}), log: () => {} };
+  await assert.rejects(processOrders(null, "Store", "Orders", options), /failed to write AD/);
+  assert.deepEqual(events, ["order", "tracking"]);
+  const result = await processOrders(null, "Store", "Orders", options);
+  assert.equal(result.writtenCount, 0);
+  assert.deepEqual(events, ["order", "tracking", "tracking", "read"]);
 });
 
 test("collecting labels keeps ordinary order writes even when emails have no usable label", async () => {
@@ -90,8 +147,10 @@ test("collecting labels keeps ordinary order writes even when emails have no usa
     },
     modify: async ({ id }) => { marked.push(id); },
   } } };
-  const sheets = { spreadsheets: { values: {
+  const grid = trackingGrid();
+  const sheets = { spreadsheets: { get: grid.get, values: {
     get: async () => ({ data: { values: [["ID Order"]] } }),
+    batchGet: grid.batchGet,
     batchUpdate: async ({ resource }) => {
       written.push(...resource.data.filter(cell => /!H\d+$/.test(cell.range)).map(cell => cell.values[0][0]));
     },
@@ -153,8 +212,10 @@ test("Get Label enforces the Gmail unread filter before processing a mixed threa
     } },
     modify: async ({ id }) => { read.push(id); },
   } } };
-  const sheets = { spreadsheets: { values: {
+  const grid = trackingGrid();
+  const sheets = { spreadsheets: { get: grid.get, values: {
     get: async () => ({ data: { values: [["ID Order"]] } }),
+    batchGet: grid.batchGet,
     batchUpdate: async ({ resource }) => {
       written.push(...resource.data.filter(cell => /!H\d+$/.test(cell.range)).map(cell => cell.values[0][0]));
     },
@@ -176,6 +237,7 @@ test("a fully linked email is marked read without re-fetching PDFs and incomplet
   const marked = [];
   const downloaded = [];
   const written = [];
+  const writtenTracking = [];
   const emails = {
     done: `Order Number: ${first}\nTracking Number: ${trackingA}\nUse the Order Number and Order Date to identify your shipment.`,
     incomplete: `Order Number: ${second}\nTracking Number: ${trackingA}\nOrder Number:\nTracking Number: ${trackingB}`,
@@ -196,21 +258,28 @@ test("a fully linked email is marked read without re-fetching PDFs and incomplet
     } },
     modify: async ({ id, resource }) => {
       assert.deepEqual(resource.removeLabelIds, ["UNREAD"]);
+      assert.deepEqual(writtenTracking, [{ range: "'Orders'!AD2", values: [[trackingA]] }]);
       marked.push(id);
     },
   } } };
   const link = { values: [{ hyperlink: "https://drive.google.com/file/d/saved-label/view" }] };
+  const grid = trackingGrid({ cells: { "'Orders'!AD3": trackingB } });
   const sheets = { spreadsheets: {
-    get: async ({ ranges }) => {
+    get: async ({ ranges, fields }) => {
+      if (fields.startsWith("sheets(properties")) return grid.get({ ranges });
       assert.deepEqual(ranges, ["'Orders'!H:H", "'Orders'!R:R"]);
       return { data: { sheets: [{ data: [
         { startColumn: 7, rowData: ["ID Order", first, second].map(formattedValue => ({ values: [{ formattedValue }] })) },
         { startColumn: 17, startRow: 1, rowData: [link, link] },
       ] }] } };
     },
-    values: { batchUpdate: async ({ resource }) => {
-      written.push(...resource.data.filter(cell => /!H\d+$/.test(cell.range)));
-    } },
+    values: {
+      batchGet: grid.batchGet,
+      batchUpdate: async ({ resource }) => {
+        written.push(...resource.data.filter(cell => /!H\d+$/.test(cell.range)));
+        if (resource.valueInputOption === "RAW") writtenTracking.push(...resource.data);
+      },
+    },
   } };
   const logs = [];
   const stats = await processOrders(null, "Shop", "Orders", {
@@ -220,6 +289,10 @@ test("a fully linked email is marked read without re-fetching PDFs and incomplet
   assert.deepEqual(marked, ["done"]);
   assert.deepEqual(downloaded, ["incomplete", "new"]);
   assert.deepEqual(written, [{ range: "'Orders'!H4", values: [[third]] }]);
+  assert.deepEqual(writtenTracking, [
+    { range: "'Orders'!AD2", values: [[trackingA]] },
+    { range: "'Orders'!AD4", values: [[trackingB]] },
+  ]);
   assert.deepEqual(stats.labelBatches.map(({ messageId, confirmable }) => [messageId, confirmable]), [
     ["incomplete", false], ["new", true],
   ]);
