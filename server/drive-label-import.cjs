@@ -8,7 +8,7 @@ const MAX_LABELS = 80;
 const folderType = "application/vnd.google-apps.folder";
 const idPattern = /^[\w-]{6,200}$/;
 const digest = (data) => createHash("sha256").update(JSON.stringify(data)).digest("hex");
-const driveFileUrl = (id) => `https://drive.google.com/file/d/${id}/view`;
+const driveFileUrl = (id) => `https://drive.google.com/file/d/${id}/view?usp=drive_link`;
 const fail = (status, message) => Object.assign(Error(message), { status, publicMessage: message });
 
 function parseDriveFolder(link) {
@@ -148,7 +148,7 @@ async function saveDriveFiles({ drive, folder, files, userId, request }) {
     do {
       const data = (await request(options => drive.files.list({
         q: `'${folder.id}' in parents and trashed = false and (${filters})`,
-        fields: "nextPageToken,files(id,name,webViewLink,appProperties)",
+        fields: "nextPageToken,files(id,name,appProperties)",
         pageSize: 100, supportsAllDrives: true, includeItemsFromAllDrives: true,
         ...(folder.driveId ? { corpora: "drive", driveId: folder.driveId } : { corpora: "user" }),
         ...(pageToken ? { pageToken } : {}),
@@ -167,9 +167,9 @@ async function saveDriveFiles({ drive, folder, files, userId, request }) {
 
   async function save(file) {
     const previous = found.get(file.key);
-    if (previous) return { name: previous.name, url: previous.webViewLink || driveFileUrl(previous.id) };
+    if (previous) return { name: previous.name, url: driveFileUrl(previous.id) };
     const id = reserved.get(file.key);
-    const fields = "id,name,webViewLink,appProperties";
+    const fields = "id,name,appProperties";
     let data;
     try {
       ({ data } = await request(options => drive.files.create({
@@ -188,7 +188,7 @@ async function saveDriveFiles({ drive, folder, files, userId, request }) {
       }, driveOptions(folder, options))));
       if (data.appProperties?.pmLabelKey !== file.key) throw error;
     }
-    return { name: data.name || file.name, url: data.webViewLink || driveFileUrl(data.id) };
+    return { name: data.name || file.name, url: driveFileUrl(data.id) };
   }
 
   const saved = [];

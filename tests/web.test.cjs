@@ -1958,7 +1958,7 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
       for await (const chunk of media.body) chunks.push(chunk);
       const file = {
         ...requestBody,
-        webViewLink: "https://drive.google.com/file/d/" + requestBody.id + "/view",
+        webViewLink: "https://drive.google.com/file/d/" + requestBody.id + "/view?usp=drivesdk",
         bytes: Buffer.concat(chunks),
       };
       saved.set(requestBody.id, file);
@@ -2057,8 +2057,8 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
   assert.equal(partialResult.markedReadCount, 0);
   assert.deepEqual(writes, ["orders", "orders", "drive:application/pdf", "drive:text/csv", "sheet"]);
   assert.deepEqual(sheetWrites[0].map(row => [row.range, row.values[0][0]]), [
-    ["'My ''Orders'''!R2", saved.get("new-file-1").webViewLink],
-    ["'My ''Orders'''!R3", saved.get("new-file-1").webViewLink],
+    ["'My ''Orders'''!R2", "https://drive.google.com/file/d/new-file-1/view?usp=drive_link"],
+    ["'My ''Orders'''!R3", "https://drive.google.com/file/d/new-file-1/view?usp=drive_link"],
   ]);
 
   const manualLink = {
@@ -2081,10 +2081,11 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
   assert.equal(saved.get("new-file-1").name, first + ".pdf");
   const csv = saved.get("new-file-4");
   assert.ok(!csv.bytes.toString("utf8").includes(first), "CSV lists the newly linked label");
-  assert.ok(csv.bytes.toString("utf8").includes(saved.get("new-file-3").webViewLink));
-  assert.equal(payload.csvUrl, csv.webViewLink);
+  const secondLabelUrl = "https://drive.google.com/file/d/new-file-3/view?usp=drive_link";
+  assert.ok(csv.bytes.toString("utf8").includes(secondLabelUrl));
+  assert.equal(payload.csvUrl, "https://drive.google.com/file/d/new-file-4/view?usp=drive_link");
   assert.deepEqual(sheetWrites[1].map(row => [row.range, row.values[0][0]]), [
-    ["'My ''Orders'''!R4", saved.get("new-file-3").webViewLink],
+    ["'My ''Orders'''!R4", secondLabelUrl],
   ]);
   assert.deepEqual(linksInSheet[1], manualLink);
   assert.deepEqual(linksInSheet[2], {});
@@ -2114,6 +2115,15 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
   assert.equal((await duringUpload.json()).skippedLinkedCount, 2);
   assert.deepEqual(linksInSheet[3], linkDuringUpload);
   assert.equal(sheetWrites.length, writesBeforeRetry);
+
+  linksInSheet[3] = {};
+  linkDuringUpload = undefined;
+  const beforeReuse = writes.length;
+  const reused = await finish(prepared.token, files);
+  assert.equal(reused.status, 200);
+  assert.equal((await reused.json()).linkedCount, 1);
+  assert.deepEqual(writes.slice(beforeReuse), ["sheet"]);
+  assert.deepEqual(sheetWrites.at(-1), [{ range: "'My ''Orders'''!R4", values: [[secondLabelUrl]] }]);
   assert.equal(saved.size, 4);
   assert.equal(idsInSheet.length, 4);
 });
