@@ -519,7 +519,7 @@ async function createWebApp(config, deps = {}) {
         const run = deps.runOrders || require("./bot.cjs").processOrders;
         runId = await admin.usage.start(user.id, accountName);
         stats = await run(auth, accountName, sheetName, {
-          spreadsheetId: user.sheet_id, includeLabels: !!driveLink,
+          spreadsheetId: user.sheet_id, includeLabels: !!driveLink, resolveLinkedEmails: !!driveLink,
           log: (level, message) => logs.push(`[${level}] ${message}`),
         });
         await admin.usage.finish(runId, "success", stats);

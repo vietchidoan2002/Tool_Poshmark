@@ -170,3 +170,58 @@ test("Get Label enforces the Gmail unread filter before processing a mixed threa
   assert.deepEqual(stats.labelBatches.map(({ messageId }) => messageId), ["still-unread"]);
   assert.ok(logs.some(line => line.includes("bỏ qua 2 email không còn nhãn chưa đọc")));
 });
+
+test("a fully linked email is marked read without re-fetching PDFs and incomplete emails stay unread", async () => {
+  const third = "abcdef0123456789abcdef03";
+  const marked = [];
+  const downloaded = [];
+  const written = [];
+  const emails = {
+    done: `Order Number: ${first}\nTracking Number: ${trackingA}\nUse the Order Number and Order Date to identify your shipment.`,
+    incomplete: `Order Number: ${second}\nTracking Number: ${trackingA}\nOrder Number:\nTracking Number: ${trackingB}`,
+    new: `Order Number: ${third}\nTracking Number: ${trackingB}\nUse the Order Number and Order Date to identify your shipment.`,
+  };
+  const gmail = { users: { messages: {
+    list: async ({ labelIds }) => {
+      assert.deepEqual(labelIds, ["UNREAD"]);
+      return { data: { messages: Object.keys(emails).map(id => ({ id })) } };
+    },
+    get: async ({ id }) => ({ data: { labelIds: ["UNREAD"], payload: { mimeType: "multipart/mixed", parts: [
+      { mimeType: "text/plain", body: { data: Buffer.from(emails[id]).toString("base64url") } },
+      { mimeType: "application/pdf", filename: "tem.pdf", body: { attachmentId: id } },
+    ] } } }),
+    attachments: { get: async ({ messageId }) => {
+      downloaded.push(messageId);
+      return { data: { data: Buffer.from("%PDF-1.4\nfixture").toString("base64url") } };
+    } },
+    modify: async ({ id, resource }) => {
+      assert.deepEqual(resource.removeLabelIds, ["UNREAD"]);
+      marked.push(id);
+    },
+  } } };
+  const link = { values: [{ hyperlink: "https://drive.google.com/file/d/saved-label/view" }] };
+  const sheets = { spreadsheets: {
+    get: async ({ ranges }) => {
+      assert.deepEqual(ranges, ["'Orders'!H:H", "'Orders'!R:R"]);
+      return { data: { sheets: [{ data: [
+        { startColumn: 7, rowData: ["ID Order", first, second].map(formattedValue => ({ values: [{ formattedValue }] })) },
+        { startColumn: 17, startRow: 1, rowData: [link, link] },
+      ] }] } };
+    },
+    values: { batchUpdate: async ({ resource }) => {
+      written.push(...resource.data.filter(cell => /!H\d+$/.test(cell.range)));
+    } },
+  } };
+  const logs = [];
+  const stats = await processOrders(null, "Shop", "Orders", {
+    gmail, sheets, spreadsheetId: "sheet", includeLabels: true, resolveLinkedEmails: true,
+    request: operation => operation({}), log: (_level, line) => logs.push(line),
+  });
+  assert.deepEqual(marked, ["done"]);
+  assert.deepEqual(downloaded, ["incomplete", "new"]);
+  assert.deepEqual(written, [{ range: "'Orders'!H4", values: [[third]] }]);
+  assert.deepEqual(stats.labelBatches.map(({ messageId, confirmable }) => [messageId, confirmable]), [
+    ["incomplete", false], ["new", true],
+  ]);
+  assert.ok(logs.some(line => line.includes("đủ link tem ở cột R")));
+});

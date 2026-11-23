@@ -1,7 +1,8 @@
 const { google } = require('googleapis');
 const cheerio = require('cheerio');
 const { createGoogleRequest } = require('./google-request.cjs');
-const { MAX_PDF_BYTES, pdfParts, trackingInOrder, loadLabelBatch } = require('./gmail-labels.cjs');
+const { MAX_PDF_BYTES, pdfParts, trackingInOrder, coversLabelReferences, loadLabelBatch } = require('./gmail-labels.cjs');
+const { sheetRows } = require('./drive-label-import.cjs');
 
 function logLine(level, message) {
     const time = new Date().toLocaleTimeString('vi-VN', { hour12: false });
@@ -44,30 +45,29 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
         // TÍNH NĂNG MỚI: QUÉT SHEET TÌM DÒNG TRỐNG & LƯU LẠI CÁC ID ĐÃ CÓ
         // ==========================================
         let targetRow = 2;
-        let existingOrderIds = new Set(); 
+        const existingOrderIds = new Set();
+        let linkedOrders = new Set();
 
         try {
-            const response = await request(requestOptions => sheets.spreadsheets.values.get({
-                spreadsheetId,
-                range: `'${sheetName.replace(/'/g, "''")}'!H:H`,
-            }, requestOptions));
-            const rows = response.data.values;
-            let lastDataRow = 1;
-            
-            if (rows) {
-                for (let r = 0; r < rows.length; r++) {
-                    if (rows[r] && rows[r][0]) {
-                        const val = String(rows[r][0]).trim().toLowerCase();
-                        if (val !== "") {
-                            existingOrderIds.add(val); // Lưu ID vào bộ nhớ để chống trùng
-                            if (val.toLowerCase() !== "id order") {
-                                lastDataRow = r + 1;
-                            }
-                        }
-                    }
+            if (labelBatches && options.resolveLinkedEmails) {
+                const rows = await sheetRows(sheets, { sheetId: spreadsheetId, sheetName }, request);
+                linkedOrders = rows.linkedOrders;
+                for (const [orderId, rowNumbers] of rows.existing) {
+                    existingOrderIds.add(orderId);
+                    targetRow = Math.max(targetRow, rowNumbers.at(-1) + 1);
+                }
+            } else {
+                const response = await request(requestOptions => sheets.spreadsheets.values.get({
+                    spreadsheetId,
+                    range: `'${sheetName.replace(/'/g, "''")}'!H:H`,
+                }, requestOptions));
+                for (const [index, row] of (response.data.values || []).entries()) {
+                    const value = String(row?.[0] || "").trim().toLowerCase();
+                    if (!value || value === "id order") continue;
+                    existingOrderIds.add(value);
+                    targetRow = Math.max(targetRow, index + 2);
                 }
             }
-            targetRow = Math.max(lastDataRow + 1, 2);
         } catch (sheetErr) {
             log("ERROR", `Không thể đọc Google Sheets: ${sheetErr.message}`);
             throw sheetErr;
@@ -171,6 +171,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
 
             let hasOrder = false;
             let hasIncompleteOrder = false;
+            let hasMalformedId = false;
             if (orderBlocks.length <= 1) {
                 log("INFO", `  -> ⚠️ BỎ QUA: Thư này không chứa thông tin Đơn Hàng hợp lệ.`);
             } else {
@@ -187,10 +188,8 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                         // "Order Number" can also occur in the mail footer as prose.
                         const hasOrderFields = /\b(?:Order\s*Date|Tracking\s*(?:Number|No\.|#)|(?:Buyer|Size|Earnings)\s*:)/i.test(block);
                         const looksLikeId = /^\s*[:#]?\s*[a-z0-9-]{16,}(?=\s|$)/i.test(block);
-                        if (!splitByOrderNumber || hasOrderFields || looksLikeId) {
-                            hasIncompleteOrder = true;
-                            log("INFO", `  -> ⚠️ LỖI NHỎ: Bắt được Đơn nhưng không tìm thấy Mã Order ID (24 ký tự)!`);
-                        }
+                        hasMalformedId ||= looksLikeId;
+                        hasIncompleteOrder ||= !splitByOrderNumber || hasOrderFields || looksLikeId;
                         continue;
                     }
 
@@ -297,17 +296,27 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
             }
 
             const canMarkRead = hasOrder && !hasIncompleteOrder;
-            if (attachments.length) {
+            const completeLabelReferences = attachments.length && !hasMalformedId &&
+                coversLabelReferences(plainText, labelOrders);
+            const alreadyLinked = completeLabelReferences &&
+                attachments.length <= new Set(labelOrders.map(order => order.orderId)).size &&
+                labelOrders.every(order => linkedOrders.has(order.orderId));
+
+            if (hasIncompleteOrder && !completeLabelReferences)
+                log("INFO", "Email có mục đơn thiếu Order ID hợp lệ. Cần đối chiếu trước khi đánh dấu đã đọc.");
+            if (attachments.length && !alreadyLinked) {
                 labelBatches.push(await loadLabelBatch({
                     gmail, request, messageId: msgId, parts: attachments, orders: labelOrders,
-                    budget: labelBudget, canMarkRead,
+                    budget: labelBudget, canMarkRead: canMarkRead || completeLabelReferences,
                 }));
-            } else if (canMarkRead) {
+            } else if (canMarkRead || alreadyLinked) {
                 await request(requestOptions => gmail.users.messages.modify({
                     userId: 'me', id: msgId,
                     resource: { removeLabelIds: ['UNREAD'] }
                 }, requestOptions));
                 markedReadCount++;
+                if (alreadyLinked)
+                    log("SKIP", "Email đã có đủ link tem ở cột R. Đã đánh dấu đã đọc.");
             }
         }
         if (markedReadCount)

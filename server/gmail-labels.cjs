@@ -11,15 +11,38 @@ function pdfParts(part) {
   return (part.parts || []).flatMap(pdfParts);
 }
 
-function trackingInOrder(block) {
+function trackingReferences(text) {
   const candidates = new Set();
-  for (const match of block.matchAll(
+  for (const match of text.matchAll(
     /\b(?:USPS\s+tracking(?:\s+(?:number|no\.?))?|tracking\s*(?:number|no\.?|#))[\s:#>]*([A-Z]{2}(?:[ \t]*\d){9}[ \t]*US|\d[\d \t-]{18,70}\d)(?![A-Z0-9])/gi,
   )) {
     const tracking = normalizeUspsTracking(match[1]);
     if (tracking) candidates.add(tracking);
   }
+  return candidates;
+}
+
+function trackingInOrder(block) {
+  const candidates = trackingReferences(block);
   return candidates.size === 1 ? [...candidates][0] : "";
+}
+
+function coversLabelReferences(text, orders) {
+  const explicitIds = new Set(
+    [...text.matchAll(/\bOrder\s*Number\b[\s:#>]+([a-f0-9]{24})\b/gi)]
+      .map(match => match[1].toLowerCase()),
+  );
+  const trackings = trackingReferences(text);
+  const byOrder = new Map();
+  const byTracking = new Map();
+  for (const { orderId, tracking } of orders) {
+    if (!explicitIds.has(orderId) || !tracking || !trackings.has(tracking)) return false;
+    if ((byOrder.has(orderId) && byOrder.get(orderId) !== tracking) ||
+        (byTracking.has(tracking) && byTracking.get(tracking) !== orderId)) return false;
+    byOrder.set(orderId, tracking);
+    byTracking.set(tracking, orderId);
+  }
+  return byOrder.size > 0 && byOrder.size === explicitIds.size && byTracking.size === trackings.size;
 }
 
 async function loadLabelBatch({ gmail, request, messageId, parts, orders, budget, canMarkRead }) {
@@ -80,5 +103,5 @@ function confirmedMessageId(secret, user, token, now = Date.now()) {
 }
 
 module.exports = {
-  MAX_PDF_BYTES, pdfParts, trackingInOrder, loadLabelBatch, issueConfirmation, confirmedMessageId,
+  MAX_PDF_BYTES, pdfParts, trackingInOrder, coversLabelReferences, loadLabelBatch, issueConfirmation, confirmedMessageId,
 };

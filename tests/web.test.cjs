@@ -1991,6 +1991,7 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
   } } };
   const { browser, login, store } = await fixture(t, async (auth, account, sheet, options) => {
     assert.equal(options.includeLabels, true);
+    assert.equal(options.resolveLinkedEmails, true);
     assert.equal(sheet, "My 'Orders'");
     writes.push("orders");
     const isNew = !idsInSheet.some(row => row[0] === second);
