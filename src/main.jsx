@@ -519,6 +519,7 @@ function App() {
     setGetOutput(current => [current,
       result.linkedCount ? `Đã gắn link cột R cho ${result.linkedCount} tem đã khớp.` : "",
       result.skippedLinkedCount ? `Đã bỏ qua ${result.skippedLinkedCount} đơn có sẵn link ở cột R.` : "",
+      result.markedReadCount ? `Đã đánh dấu ${result.markedReadCount} thư là đã đọc.` : "",
       ...result.warnings,
     ].filter(Boolean).join("\n"));
   }

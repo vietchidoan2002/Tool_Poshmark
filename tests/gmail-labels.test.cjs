@@ -67,17 +67,23 @@ test("collecting labels keeps ordinary order writes even when emails have no usa
   const pdf = Buffer.from("%PDF-1.4\nfixture");
   const marked = [];
   const written = [];
+  const third = "abcdef0123456789abcdef03";
   const gmail = { users: { messages: {
     list: async () => ({ data: { messages: [
-      { id: "mail-with-tem" }, { id: "mail-without-tem" }, { id: "irrelevant" },
+      { id: "mail-with-tem" }, { id: "mail-without-tem" },
+      { id: "mail-incomplete" }, { id: "irrelevant" },
     ] } }),
     get: async ({ id }) => {
       const text = id === "mail-with-tem"
         ? `Order Number ${first}\nTracking Number: ${trackingA}\nOrder Number means your order reference`
-        : id === "mail-without-tem" ? `Order Number ${second}` : "Newsletter";
+        : id === "mail-without-tem"
+          ? `Order Number ${second}\nOrder Number means your order reference`
+          : id === "mail-incomplete"
+            ? `Order Number ${third}\nTracking Number: ${trackingA}\nOrder Number:\nTracking Number: ${trackingB}`
+            : "Order Number means your order reference";
       return { data: { labelIds: ["UNREAD"], payload: { mimeType: "multipart/mixed", parts: [
         { mimeType: "text/plain", body: { data: Buffer.from(text).toString("base64url") } },
-        ...(id === "mail-with-tem"
+        ...(id === "mail-with-tem" || id === "mail-incomplete"
           ? [{ mimeType: "application/pdf", filename: "label.pdf", body: { data: pdf.toString("base64url") } }]
           : []),
       ] } } };
@@ -93,11 +99,12 @@ test("collecting labels keeps ordinary order writes even when emails have no usa
   const report = await processOrders(null, "Shop", "Orders", {
     gmail, sheets, includeLabels: true, request: fn => fn({}), log: () => {},
   });
-  assert.equal(report.writtenCount, 2);
-  assert.deepEqual(written, [first, second]);
+  assert.equal(report.writtenCount, 3);
+  assert.deepEqual(written, [first, second, third]);
   assert.deepEqual(marked, ["mail-without-tem"]);
-  assert.equal(report.labelBatches.length, 1);
-  assert.equal(report.labelBatches[0].confirmable, false);
+  assert.equal(report.labelBatches.length, 2);
+  assert.equal(report.labelBatches[0].confirmable, true);
+  assert.equal(report.labelBatches[1].confirmable, false);
   assert.deepEqual(report.labelBatches[0].orders, [{ orderId: first, tracking: trackingA }]);
 });
 

@@ -626,20 +626,22 @@ async function createWebApp(config, deps = {}) {
 
         const finished = files.filter(({ orderId }) => alreadyLinked.has(orderId) || links.has(orderId));
         const readMessages = completedMessages(plan, req.body.completedBatches, finished);
+        let markedReadCount = 0;
         if (readMessages.length) {
           try {
             const gmail = deps.labelsGmailFactory?.(auth) || google.gmail({ version: "v1", auth });
             await request(options => gmail.users.messages.batchModify({
               userId: "me", resource: { ids: readMessages, removeLabelIds: ["UNREAD"] },
             }, options));
+            markedReadCount = readMessages.length;
           } catch {
-            warnings.push("Đã gắn link tem nhưng Gmail chưa đánh dấu được thư đã đọc. Chạy lại sẽ dùng lại tệp đã lưu.");
+            warnings.push("Link tem đã có trong Sheets nhưng Gmail chưa đánh dấu được thư đã đọc. Chạy lại Get Label để thử lại.");
           }
         }
         if ((await Promise.all(refreshWrites)).includes(false))
           warnings.push("Chưa lưu được token Google mới. Có thể cần kết nối lại lần sau.");
         return res.json({
-          linkedCount: links.size, skippedLinkedCount: alreadyLinked.size, csvUrl, folderUrl, warnings,
+          linkedCount: links.size, skippedLinkedCount: alreadyLinked.size, markedReadCount, csvUrl, folderUrl, warnings,
         });
       } catch (error) {
         await Promise.allSettled(refreshWrites);

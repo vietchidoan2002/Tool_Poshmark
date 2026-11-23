@@ -1932,6 +1932,7 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
   const saved = new Map();
   let nextFile = 1;
   let issue = false;
+  let failMarkRead = false;
   const idsInSheet = [["ID Order"], [first], [first]];
   const linksInSheet = [{}, { formattedValue: first, userEnteredValue: { stringValue: first } }];
   let driveRequests = 0;
@@ -2008,6 +2009,7 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
       driveRequest: operation => operation({}),
       labelsGmailFactory: () => ({ users: { messages: { batchModify: async ({ resource }) => {
         assert.deepEqual(resource, { ids: ["email-1"], removeLabelIds: ["UNREAD"] });
+        if (failMarkRead) throw Error("Gmail unavailable");
         writes.push("gmail");
       } } } }),
     },
@@ -2049,7 +2051,9 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
 
   const partial = await finish(flagged.token, [files[0]], { completedBatches: [0] });
   assert.equal(partial.status, 200);
-  assert.equal((await partial.json()).linkedCount, 1);
+  const partialResult = await partial.json();
+  assert.equal(partialResult.linkedCount, 1);
+  assert.equal(partialResult.markedReadCount, 0);
   assert.deepEqual(writes, ["orders", "orders", "drive:application/pdf", "drive:text/csv", "sheet"]);
   assert.deepEqual(sheetWrites[0].map(row => [row.range, row.values[0][0]]), [
     ["'My ''Orders'''!R2", saved.get("new-file-1").webViewLink],
@@ -2070,6 +2074,7 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
   const payload = await complete.json();
   assert.equal(payload.linkedCount, 1);
   assert.equal(payload.skippedLinkedCount, 1);
+  assert.equal(payload.markedReadCount, 1);
   assert.deepEqual(writes.slice(5), ["orders", "drive:application/pdf", "drive:text/csv", "sheet", "gmail"]);
   assert.deepEqual([...saved.values()].map(f => f.mimeType), ["application/pdf", "text/csv", "application/pdf", "text/csv"]);
   assert.equal(saved.get("new-file-1").name, first + ".pdf");
@@ -2084,9 +2089,17 @@ test("Get Label writes ordinary orders first and links only verified Drive PDFs 
   assert.deepEqual(linksInSheet[2], {});
   const requestsBeforeRetry = driveRequests;
   const writesBeforeRetry = sheetWrites.length;
-  const retry = await finish(prepared.token, files);
+  failMarkRead = true;
+  const failedAck = await finish(prepared.token, files, { completedBatches: [0] });
+  assert.equal(failedAck.status, 200);
+  const failedAckResult = await failedAck.json();
+  assert.equal(failedAckResult.markedReadCount, 0);
+  assert.match(failedAckResult.warnings[0], /Gmail chưa đánh dấu/);
+
+  failMarkRead = false;
+  const retry = await finish(prepared.token, files, { completedBatches: [0] });
   assert.equal(retry.status, 200);
-  assert.deepEqual(await retry.json(), { linkedCount: 0, skippedLinkedCount: 2, warnings: [] });
+  assert.deepEqual(await retry.json(), { linkedCount: 0, skippedLinkedCount: 2, markedReadCount: 1, warnings: [] });
   assert.equal(driveRequests, requestsBeforeRetry);
   assert.equal(sheetWrites.length, writesBeforeRetry);
 

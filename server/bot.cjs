@@ -24,6 +24,7 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
     let writtenCount = 0;
     let writtenOrderCount = 0;
     let skippedCount = 0;
+    let markedReadCount = 0;
     const labelBatches = options.includeLabels ? [] : null;
     const labelBudget = { bytes: MAX_PDF_BYTES, files: 0 };
     const stats = () => ({
@@ -161,13 +162,15 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
 
             // SỬA LỖI LỆCH ID: Nếu thư có "Order Number" (nằm đầu mỗi đơn) thì cắt theo "Order Number", ngược lại mới cắt theo "Order Date"
             let orderBlocks = [];
-            if (plainText.match(/Order\s*Number/i)) {
+            const splitByOrderNumber = /Order\s*Number/i.test(plainText);
+            if (splitByOrderNumber) {
                 orderBlocks = plainText.split(/Order\s*Number/i);
             } else if (plainText.match(/Order\s*Date/i)) {
                 orderBlocks = plainText.split(/Order\s*Date/i);
             }
 
-            let canMarkRead = orderBlocks.length > 1;
+            let hasOrder = false;
+            let hasIncompleteOrder = false;
             if (orderBlocks.length <= 1) {
                 log("INFO", `  -> ⚠️ BỎ QUA: Thư này không chứa thông tin Đơn Hàng hợp lệ.`);
             } else {
@@ -181,11 +184,17 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                     if (orderMatch) orderId = orderMatch[1].trim().toLowerCase();
                     
                     if (!orderId) {
-                        canMarkRead = false;
-                        log("INFO", `  -> ⚠️ LỖI NHỎ: Bắt được Đơn nhưng không tìm thấy Mã Order ID (24 ký tự)!`);
+                        // "Order Number" can also occur in the mail footer as prose.
+                        const hasOrderFields = /\b(?:Order\s*Date|Tracking\s*(?:Number|No\.|#)|(?:Buyer|Size|Earnings)\s*:)/i.test(block);
+                        const looksLikeId = /^\s*[:#]?\s*[a-z0-9-]{16,}(?=\s|$)/i.test(block);
+                        if (!splitByOrderNumber || hasOrderFields || looksLikeId) {
+                            hasIncompleteOrder = true;
+                            log("INFO", `  -> ⚠️ LỖI NHỎ: Bắt được Đơn nhưng không tìm thấy Mã Order ID (24 ký tự)!`);
+                        }
                         continue;
                     }
 
+                    hasOrder = true;
                     if (attachments.length)
                         labelOrders.push({ orderId, tracking: trackingInOrder(block) });
 
@@ -287,16 +296,22 @@ async function processOrders(auth, manualAccountName, sheetName, options = {}) {
                 }
             }
 
+            const canMarkRead = hasOrder && !hasIncompleteOrder;
             if (attachments.length) {
                 labelBatches.push(await loadLabelBatch({
                     gmail, request, messageId: msgId, parts: attachments, orders: labelOrders,
                     budget: labelBudget, canMarkRead,
                 }));
-            } else if (canMarkRead) await request(requestOptions => gmail.users.messages.modify({
-                userId: 'me', id: msgId,
-                resource: { removeLabelIds: ['UNREAD'] }
-            }, requestOptions));
+            } else if (canMarkRead) {
+                await request(requestOptions => gmail.users.messages.modify({
+                    userId: 'me', id: msgId,
+                    resource: { removeLabelIds: ['UNREAD'] }
+                }, requestOptions));
+                markedReadCount++;
+            }
         }
+        if (markedReadCount)
+            log('INFO', `Đã đánh dấu ${markedReadCount} thư là đã đọc.`);
         if (noLongerUnread)
             log('INFO', `Đã bỏ qua ${noLongerUnread} email không còn nhãn chưa đọc.`);
         if (res.data.nextPageToken) log('INFO', 'Còn email chưa xử lý. Chạy lại để tiếp tục (tối đa 25 email mỗi lần).');
